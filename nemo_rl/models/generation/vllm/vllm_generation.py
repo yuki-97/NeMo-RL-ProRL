@@ -177,8 +177,9 @@ class VllmGeneration(GenerationInterface):
         # Used to track the round-robin selection of worker groups for generate_async
         self.current_generate_dp_shard_idx = 0
 
-        # Save the device uuids for the workers
+        # Save infos for the workers
         self.device_uuids = self._report_device_id()
+        self.server_urls = self._report_server_url()
 
     def _get_tied_worker_bundle_indices(
         self, cluster: RayVirtualCluster
@@ -306,6 +307,20 @@ class VllmGeneration(GenerationInterface):
         # Use run_all_workers_single_data for methods that don't need data
         futures = self.worker_group.run_all_workers_single_data(
             method_name, run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"]
+        )
+        # Wait for all futures to complete
+        results = ray.get(futures)
+        return results
+
+    def _report_server_url(self) -> list[list[str]]:
+        """Report the server URL of vllm workers."""
+        # Only async engine has server url
+        if not self.cfg["vllm_cfg"]["async_engine"]:
+            return None
+        # Use run_all_workers_single_data for methods that don't need data
+        futures = self.worker_group.run_all_workers_single_data(
+            "report_server_url_async",
+            run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
         )
         # Wait for all futures to complete
         results = ray.get(futures)

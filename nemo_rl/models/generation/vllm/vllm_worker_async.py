@@ -48,6 +48,36 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         self.llm = AsyncLLM.from_engine_args(AsyncEngineArgs(**llm_kwargs))
 
+        self.server_url = None
+        if self.cfg["vllm_cfg"].get("expose_http_server", False):
+            self._setup_http_server()
+
+    def _setup_http_server(self):
+        import threading
+
+        import uvicorn
+        from fastapi import FastAPI
+
+        from nemo_rl.distributed.virtual_cluster import (
+            _get_free_port_local,
+            _get_node_ip_local,
+        )
+
+        app = FastAPI()
+        app.router.add_api_route(
+            "/generate", self.generate_async_for_http, methods=["POST"]
+        )
+
+        ip = _get_node_ip_local()
+        port = _get_free_port_local()
+        self.server_url = f"{ip}:{port}"
+
+        config = uvicorn.Config(app, host="0.0.0.0", port=port)
+        server = uvicorn.Server(config)
+
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
     async def post_init_async(self):
         self.vllm_device_ids = await self.report_device_id_async()
 
@@ -385,6 +415,15 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 await asyncio.gather(*prompt_tasks, return_exceptions=True)
                 raise e
 
+    async def generate_async_for_http(self, request: dict) -> dict:
+        """Generate responses asynchronously for HTTP request."""
+        data = request["data"]
+        greedy = request["greedy"]
+
+        result = await self.generate_async(data, greedy=greedy)
+
+        return result
+
     async def report_device_id_async(self) -> list[str]:
         """Async version of report_device_id."""
         assert self.llm is not None, (
@@ -404,6 +443,10 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             list_of_worker_results = result_or_coro
 
         return cast(list[str], list_of_worker_results)
+
+    async def report_server_url_async(self) -> str:
+        """Report the server URL of vllm worker."""
+        return self.server_url
 
     async def prepare_refit_info_async(self, state_dict_info: dict[str, Any]) -> None:
         """Async version of prepare_refit_info."""
