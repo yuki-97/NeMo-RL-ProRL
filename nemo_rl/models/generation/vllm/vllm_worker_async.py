@@ -139,16 +139,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         self.llm = AsyncLLM.from_engine_args(self.llm_async_engine_args)
 
         self.server_thread, self.base_url, self.http_server = None, None, None
-        if self.cfg["vllm_cfg"].get("expose_http_server"):
+        if self.cfg["vllm_cfg"].get("expose_http_server", None):
             self.server_thread, self.base_url, self.http_server = (
                 self._setup_vllm_server()
             )
 
     async def post_init_async(self):
         self.vllm_device_ids = await self.report_device_id_async()
-
-    async def report_dp_openai_server_base_url(self) -> Optional[str]:
-        return self.base_url
 
     def _setup_vllm_openai_api_server(self, app: FastAPI) -> FastAPI:
         from typing import List, Optional, Union
@@ -368,7 +365,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         # e.g. last-run middleware.
         app = FastAPI()
 
-        app = self._setup_vllm_openai_api_server(app)
+        server_type = self.cfg["vllm_cfg"]["expose_http_server"]
+        if server_type == "openai":
+            app = self._setup_vllm_openai_api_server(app)
+        elif server_type == "http":
+            app.router.add_api_route(
+                "/generate", self.generate_async_for_http, methods=["POST"]
+            )
 
         ########################################
         # Server spinup
@@ -377,7 +380,9 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         node_ip = _get_node_ip_local()
         free_port = _get_free_port_local()
 
-        base_url = f"http://{node_ip}:{free_port}/v1"
+        base_url = f"{node_ip}:{free_port}"
+        if server_type == "openai":
+            base_url = f"http://{base_url}/v1"
         print(f"Starting server on {base_url}")
 
         config = uvicorn.Config(
@@ -732,6 +737,15 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 await asyncio.gather(*prompt_tasks, return_exceptions=True)
                 raise e
 
+    async def generate_async_for_http(self, request: dict) -> dict:
+        """Generate responses asynchronously for HTTP request."""
+        data = request["data"]
+        greedy = request["greedy"]
+
+        result = await self.generate_async(data, greedy=greedy)
+
+        return result
+
     async def report_device_id_async(self) -> list[str]:
         """Async version of report_device_id."""
         assert self.llm is not None, (
@@ -751,6 +765,10 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             list_of_worker_results = result_or_coro
 
         return cast(list[str], list_of_worker_results)
+
+    async def report_server_url_async(self) -> str:
+        """Report the server URL of vllm worker."""
+        return self.base_url
 
     async def prepare_refit_info_async(self, state_dict_info: dict[str, Any]) -> None:
         """Async version of prepare_refit_info."""

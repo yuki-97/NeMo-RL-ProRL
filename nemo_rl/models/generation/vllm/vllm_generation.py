@@ -195,9 +195,6 @@ class VllmGeneration(GenerationInterface):
         # This is necessary for async engine to work
         self._post_init()
 
-        # dp_openai_server_base_urls is only returned by Async vLLM flow when http server is active
-        self.dp_openai_server_base_urls = self._report_dp_openai_server_base_urls()
-
         # Number of data parallel groups is the number of tied worker groups
         assert self.dp_size == self.worker_group.dp_size, (
             f"Data parallel size mismatch. Expected {self.dp_size}, got {self.worker_group.dp_size}"
@@ -206,8 +203,10 @@ class VllmGeneration(GenerationInterface):
         # Used to track the round-robin selection of worker groups for generate_async
         self.current_generate_dp_shard_idx = 0
 
-        # Save the device uuids for the workers
+        # Save infos for the workers
         self.device_uuids = self._report_device_id()
+        # Only returned by Async vLLM flow when http server is active
+        self.server_urls = self._report_server_url()
 
     def _get_tied_worker_bundle_indices(
         self, cluster: RayVirtualCluster
@@ -340,14 +339,14 @@ class VllmGeneration(GenerationInterface):
         results = ray.get(futures)
         return results
 
-    def _report_dp_openai_server_base_urls(self) -> list[Optional[str]]:
-        """Report the data parallel OpenAI server base URLs of vLLM workers, only populated if it is async vLLM engine and the HTTP server is active."""
+    def _report_server_url(self) -> list[Optional[str]]:
+        """Report the server URL of vllm workers."""
         if not self.cfg["vllm_cfg"]["async_engine"]:
             return [None]  # Not applicable since this is sync
 
         # Use run_all_workers_single_data for methods that don't need data
         futures = self.worker_group.run_all_workers_single_data(
-            "report_dp_openai_server_base_url",
+            "report_server_url_async",
             run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
         )
         # Wait for all futures to complete

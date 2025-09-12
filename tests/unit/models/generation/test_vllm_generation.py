@@ -1105,7 +1105,7 @@ def test_vllm_http_server(cluster, tokenizer):
     vllm_generation = VllmGeneration(cluster, generation_config)
 
     # We expect one server per vLLM DP rank.
-    base_urls = vllm_generation.dp_openai_server_base_urls
+    base_urls = vllm_generation.server_urls
     assert len(base_urls) == cluster.num_gpus_per_node
 
     body = dict(
@@ -1310,7 +1310,7 @@ async def test_vllm_http_server_correct_merged_tokens_matches_baseline(
     vllm_generation = VllmGeneration(cluster, generation_config)
 
     # We expect one server per vLLM DP rank.
-    base_urls = vllm_generation.dp_openai_server_base_urls
+    base_urls = vllm_generation.server_urls
     assert len(base_urls) == cluster.num_gpus_per_node
 
     detokenized_str = " Skinny"
