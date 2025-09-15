@@ -15,31 +15,19 @@
 import argparse
 import os
 import pprint
-from collections import defaultdict
-from typing import Any, Optional
+from typing import Optional
 
+from datasets import Dataset, load_dataset
 from omegaconf import OmegaConf
 from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
-from nemo_rl.data.datasets import AllTaskProcessedDataset
-from nemo_rl.data.hf_datasets.deepscaler import DeepScalerDataset
-from nemo_rl.data.hf_datasets.openmathinstruct2 import OpenMathInstruct2Dataset
-from nemo_rl.data.interfaces import (
-    DatumSpec,
-    LLMMessageLogType,
-    TaskDataProcessFnCallable,
-    TaskDataSpec,
-)
-from nemo_rl.distributed.ray_actor_environment_registry import (
-    get_actor_python_env,
-)
 from nemo_rl.distributed.virtual_cluster import init_ray
-from nemo_rl.environments.interfaces import EnvironmentInterface
-from nemo_rl.environments.math_environment import MathEnvironment
+from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
 from nemo_rl.models.generation import configure_generation_config
+from nemo_rl.models.generation.vllm import VllmGeneration
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
 from nemo_rl.utils.logger import get_next_experiment_dir
 
@@ -59,133 +47,35 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     return args, overrides
 
 
-# ===============================================================================
-#                             Math Data Processor
-# ===============================================================================
-TokenizerType = PreTrainedTokenizerBase
+def setup_data(data_config: DataConfig) -> tuple[Dataset, Optional[Dataset]]:
+    dataset = load_dataset("parquet", data_files=data_config["train_data_path"])
+    dataset = dataset["train"]
 
-
-# TaskDataProcessFnCallable
-def hf_data_processor(
-    datum_dict: dict[str, Any],
-    task_data_spec: TaskDataSpec,
-    tokenizer: TokenizerType,
-    max_seq_length: int,
-    idx: int,
-) -> DatumSpec:
-    """Process a datum dictionary (directly loaded from data/hf_datasets/openmathinstruct2.py) into a DatumSpec for the Math Environment."""
-    user_message = datum_dict["messages"]
-    problem = user_message[0]["content"]
-    extra_env_info = {"ground_truth": user_message[1]["content"]}
-
-    message_log: LLMMessageLogType = []
-    user_message = {
-        "role": "user",
-        "content": task_data_spec.prompt.format(problem),
-    }
-    message: list[str] = tokenizer.apply_chat_template(  # type: ignore
-        [user_message],
-        tokenize=False,
-        add_generation_prompt=True,
-        add_special_tokens=False,
-    )
-
-    user_message["token_ids"] = tokenizer(
-        message,
-        return_tensors="pt",
-        add_special_tokens=False,
-    )["input_ids"][0]
-    user_message["content"] = message
-    message_log.append(user_message)
-
-    length = sum(len(m["token_ids"]) for m in message_log)
-
-    loss_multiplier = 1.0
-    if length > max_seq_length:
-        # make smaller and mask out
-        for chat_message in message_log:
-            chat_message["token_ids"] = chat_message["token_ids"][
-                : min(4, max_seq_length // len(message_log))
-            ]
-        loss_multiplier = 0.0
-
-    output: DatumSpec = {
-        "message_log": message_log,
-        "length": length,
-        "extra_env_info": extra_env_info,
-        "loss_multiplier": loss_multiplier,
-        "idx": idx,
-        "task_name": datum_dict["task_name"],
-    }
-    return output
-
-
-def setup_data(
-    tokenizer: TokenizerType,
-    data_config: DataConfig,
-    env_configs: dict[str, Any],
-    seed: int,
-) -> tuple[
-    AllTaskProcessedDataset,
-    Optional[AllTaskProcessedDataset],
-    dict[str, EnvironmentInterface],
-    dict[str, EnvironmentInterface],
-]:
-    print("\n▶ Setting up data...")
-    math_task_spec = TaskDataSpec(
-        task_name="math",
-        prompt_file=data_config["prompt_file"],
-        system_prompt_file=data_config["system_prompt_file"],
-    )
-
-    # Load OpenMathInstruct2Dataset using nemo rl datasets
-    if data_config["dataset_name"] == "OpenMathInstruct-2":
-        print("Loading nvidia/OpenMathInstruct2Dataset for training and validation")
-        data: Any = OpenMathInstruct2Dataset(seed=seed)
-    elif data_config["dataset_name"] == "DeepScaler":
-        print(
-            "Loading agentica-org/DeepScaleR-Preview-Dataset for training and validation"
-        )
-        data: Any = DeepScalerDataset(seed=seed)
-    else:
-        raise ValueError(f"No processor for dataset {data_config['dataset_name']}.")
-
-    task_data_processors: dict[str, tuple[TaskDataSpec, TaskDataProcessFnCallable]] = (
-        defaultdict(lambda: (math_task_spec, hf_data_processor))
-    )
-    task_data_processors["math"] = (math_task_spec, hf_data_processor)
-
-    math_env = MathEnvironment.options(  # type: ignore # it's wrapped with ray.remote
-        runtime_env={
-            "py_executable": get_actor_python_env(
-                "nemo_rl.environments.math_environment.MathEnvironment"
-            ),
-            "env_vars": dict(os.environ),  # Pass thru all user environment variables
-        }
-    ).remote(env_configs["math"])
-    dataset = AllTaskProcessedDataset(
-        data.formatted_ds["train"],
-        tokenizer,
-        math_task_spec,
-        task_data_processors,
-        max_seq_length=data_config["max_input_seq_length"],
-    )
-
-    val_dataset: Optional[AllTaskProcessedDataset] = None
-    if data.formatted_ds["validation"]:
-        val_dataset = AllTaskProcessedDataset(
-            data.formatted_ds["validation"],
-            tokenizer,
-            math_task_spec,
-            task_data_processors,
-            max_seq_length=data_config["max_input_seq_length"],
-        )
+    if "val_data_path" in data_config:
+        val_dataset = load_dataset("parquet", data_files=data_config["val_data_path"])
+        val_dataset = val_dataset["train"]
     else:
         val_dataset = None
 
-    task_to_env: dict[str, EnvironmentInterface] = defaultdict(lambda: math_env)
-    task_to_env["math"] = math_env
-    return dataset, val_dataset, task_to_env, task_to_env
+    return dataset, val_dataset
+
+
+def setup_env(
+    master_config: MasterConfig,
+    policy_generation: VllmGeneration,
+    tokenizer: PreTrainedTokenizerBase,
+):
+    dp_size = policy_generation.dp_size
+    server_urls = policy_generation.server_urls
+
+    env = OpenhandsEnvironment(
+        config=master_config,
+        tokenizer=tokenizer,
+        server_addresses=server_urls,
+        dp_size=dp_size,
+    )
+
+    return env
 
 
 def main() -> None:
@@ -232,13 +122,9 @@ def main() -> None:
     )
 
     # setup data
-    (
-        dataset,
-        val_dataset,
-        task_to_env,
-        val_task_to_env,
-    ) = setup_data(tokenizer, config["data"], config["env"], config["grpo"]["seed"])
+    dataset, val_dataset = setup_data(config["data"])
 
+    # setup policy and generation
     (
         policy,
         policy_generation,
@@ -251,6 +137,13 @@ def main() -> None:
         grpo_state,
         master_config,
     ) = setup(config, tokenizer, dataset, val_dataset)
+
+    # setup environment
+    task_to_env, val_task_to_env = setup_env(
+        config,
+        policy_generation,
+        tokenizer,
+    )
 
     grpo_train(
         policy,

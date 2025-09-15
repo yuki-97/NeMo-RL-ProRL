@@ -420,6 +420,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         self,
         data: BatchedDataDict[GenerationDatumSpec],
         greedy: bool = False,
+        max_new_tokens: Optional[int] = None,
     ) -> AsyncGenerator[tuple[int, BatchedDataDict[GenerationOutputSpec]], None]:
         """Generate a batch of data using vLLM's AsyncLLMEngine, yielding results as they are ready.
 
@@ -471,10 +472,15 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 [per_sample_stop_strings] if per_sample_stop_strings else None
             )
 
-            remaining_ctx = (
-                self.cfg["vllm_cfg"]["max_model_len"] - current_input_actual_length
-            )
-            allowed_new_tokens = max(0, min(self.cfg["max_new_tokens"], remaining_ctx))
+            if max_new_tokens is not None:
+                allowed_new_tokens = max_new_tokens
+            else:
+                remaining_ctx = (
+                    self.cfg["vllm_cfg"]["max_model_len"] - current_input_actual_length
+                )
+                allowed_new_tokens = max(
+                    0, min(self.cfg["max_new_tokens"], remaining_ctx)
+                )
 
             # Handle case where no tokens can be generated due to length constraints
             if allowed_new_tokens == 0:
@@ -739,11 +745,33 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
     async def generate_async_for_http(self, request: dict) -> dict:
         """Generate responses asynchronously for HTTP request."""
-        data = request["data"]
-        greedy = request["greedy"]
+        # Get data from request
+        input_ids = request["prompt_ids"]
+        # TODO: check the logic of length parameters
+        max_new_tokens = request["max_tokens"]
+        # TODO: not used for now, need check later
+        temperature = request["temperature"]
+        top_p = request["top_p"]
+        seed = request["seed"]
 
-        result = await self.generate_async(data, greedy=greedy)
+        # Convert to BatchedDataDict for generation
+        data = BatchedDataDict(
+            {
+                "input_ids": torch.tensor([input_ids]),
+                "input_lengths": torch.tensor([len(input_ids)]),
+            }
+        )
 
+        # Generate result
+        async_generator = self.generate_async(data, max_new_tokens=max_new_tokens)
+        async for _, result in async_generator:
+            pass
+
+        # Convert result to dict
+        result = {
+            "response_ids": result["output_ids"][0].tolist(),
+            "logprobs": result["logprobs"][0].tolist(),
+        }
         return result
 
     async def report_device_id_async(self) -> list[str]:

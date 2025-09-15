@@ -723,6 +723,8 @@ def grpo_train(
                             ],
                             greedy=False,
                         )
+                    if master_config["data"].get("use_raw_data", False):
+                        input_ids = repeated_batch["prompt_ids"]
                     policy_generation.finish_generation()
 
                 # Calculate rewards & advantages
