@@ -1,43 +1,19 @@
-# Standard library imports for async operations, logging, and networking
 import asyncio
 import logging
-import os
-import socket
 from typing import Dict, List, Tuple
 
-# Ray framework for distributed computing
-import ray
-from omegaconf import DictConfig
-
-# VERL framework imports
-from verl.protocol import DataProto  # Data protocol for tensor/non-tensor data exchange
-from verl.single_controller.ray.base import (
-    RayWorkerGroup,  # Ray worker group management
-)
-
-# Logging configuration
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-# Chat template management for different model types
 import aiohttp
-
-# PyTorch and HTTP client imports
 import torch
-from verl.utils.model import compute_position_id_with_mask
+from transformers import PreTrainedTokenizerBase
 
-from .chat_template_manager import get_chat_template
-from .utils import convert_right_padding_to_left, pad_to_max_length_right
+from nemo_rl.algorithms.grpo import MasterConfig
+from nemo_rl.distributed.virtual_cluster import _get_node_ip_local
 
-
-def _get_free_port():
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        return sock.getsockname()[1]
+logger = logging.getLogger(__name__)
 
 
-class AsyncLLMServerManager:
-    """AsyncLLMServerManager manages a distributed group of async LLM server instances.
+class OpenhandsEnvironment:
+    """OpenhandsEnvironment manages a distributed group of async LLM server instances.
 
     This class provides a high-level interface for managing multiple vLLM server instances
     running in a Ray cluster. It handles:
@@ -67,17 +43,20 @@ class AsyncLLMServerManager:
     worker group topology.
     """
 
-    def __init__(self, config: DictConfig, worker_group: RayWorkerGroup):
-        """Initialize AsyncLLMServerManager with configuration and worker group.
+    def __init__(
+        self,
+        config: MasterConfig,
+        tokenizer: PreTrainedTokenizerBase,
+        server_addresses: List[str],
+        dp_size: int,
+    ):
+        """Initialize OpenhandsEnvironment with configuration and worker group.
 
         Args:
-            config (DictConfig): Complete configuration object containing:
-                - actor_rollout_ref: Rollout configuration settings
-                - data: Data processing configuration (max lengths, etc.)
-                - model: Model configuration (path, parameters, etc.)
-            worker_group (RayWorkerGroup): Ray worker group for distributed execution
-                - Contains worker topology information
-                - Manages worker lifecycle and communication
+            config (MasterConfig): Complete configuration object
+            tokenizer (PreTrainedTokenizerBase): Tokenizer that contains custom chat template
+            server_addresses (List[str]): List of server addresses
+            dp_size (int): Data parallel size
 
         The initialization process:
         1. Extracts relevant configuration parameters
@@ -87,82 +66,75 @@ class AsyncLLMServerManager:
         5. Configures OpenHands server integration
         6. Sets up sampling parameters for generation
         """
-        # Store complete configuration and extract rollout-specific config
+        # Store configuration
         self.full_config = config
-        self.config = config.actor_rollout_ref
-        self.worker_group = worker_group
+        self.config = config["policy"]["generation"]
+        self.server_addresses = server_addresses
+        self.dp_size = dp_size
 
-        # Calculate parallel topology from worker group
-        # tensor_model_parallel_size: Number of GPUs per model instance (for large models)
-        # rollout_dp_size: Number of data parallel replicas (for throughput scaling)
-        self.rollout_tp_size = self.config.rollout.tensor_model_parallel_size
-        self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
-
-        # Initialize server management data structures
-        self.async_llm_servers = [None] * self.rollout_dp_size  # Ray actor references
-        self.server_addresses = [None] * self.rollout_dp_size  # HTTP server addresses
-
-        # Start LLM server instances and initialize their engines
-        self.start_llm_servers()
-        # All server instances are ready, initialize AsyncLLM engines
-        ray.get([server.init_engine.remote() for server in self.async_llm_servers])
+        # TODO: tmp for local testing
+        # stuffs need to be added in to env configs
+        openhands_num_workers = 64
+        native_tool_calling = True
+        # current implementation only supports token level generation
+        token_level_generation = True
+        ensure_thinking_end_properly = token_level_generation
+        local_ip = _get_node_ip_local()
+        openhands_base_url = f"http://{local_ip}:8006"
 
         # Extract generation and processing parameters
-        self.num_trajectories = (
-            self.config.rollout.n
-        )  # Number of trajectories per prompt
-        self.remove_think_tokens = (
-            self.config.rollout.remove_think_tokens
-        )  # Token filtering
+        # Number of trajectories per prompt
+        self.num_trajectories = self.full_config["grpo"]["num_generations_per_prompt"]
+        # Token filtering
+        # Not supported and not used yet
+        # self.remove_think_tokens = False
 
-        # Get tokenizer from the first server instance via Ray remote call
-        # This ensures we use the same tokenizer as the inference engines
-        self.tokenizer = ray.get(self.async_llm_servers[0].get_tokenizer.remote())
-        self.tokenizer = self.tokenizer.tokenizer  # Extract the actual tokenizer object
+        # Use the tokenizer passed in the constructor
+        self.tokenizer = tokenizer
 
+        # TODO: support prompt, response, start length
         # Set sequence length constraints from configuration
-        self.max_prompt_length = self.full_config.data.max_prompt_length
-        self.max_response_length = self.full_config.data.max_response_length
-        self.total_len = self.max_prompt_length + self.max_response_length
-        self.max_starting_message_length = (
-            self.config.rollout.max_starting_message_length
-        )
+        self.max_prompt_length = self.config["vllm_cfg"]["max_model_len"]
+        # set at request time
+        # self.max_response_length = None
+        self.total_len = self.config["vllm_cfg"]["max_model_len"]
+        self.max_starting_message_length = self.config["vllm_cfg"]["max_model_len"]
 
         # Use CPU device for tensor operations (data preparation)
         self.device = torch.device("cpu")
 
         # OpenHands worker configuration for parallel processing
-        self.openhands_num_workers = self.config.rollout.openhands_num_workers
+        self.openhands_num_workers = openhands_num_workers
 
         # Extract model name from path for API identification
-        model_name = "/".join(self.config.model.path.split("/")[-2:])
+        model_name = "/".join(self.full_config["policy"]["model_name"].split("/")[-2:])
 
         # Configure sampling parameters for generation
         # These parameters control the randomness and quality of generated text
         self.sampling_params = {
             "model": f"hosted_vllm/{model_name}",
-            "api_key": "dummy_key",  # Placeholder for local servers
+            # Placeholder for local servers
+            "api_key": "dummy_key",
             "modify_params": False,
             "log_completions": False,
-            "native_tool_calling": self.config.rollout.get("native_tool_calling", True),
-            "temperature": self.config.rollout.temperature,  # Randomness control
-            "top_p": self.config.rollout.top_p,  # Nucleus sampling
-            "max_iterations": self.config.rollout.max_iterations,  # Max tool calls
-            "max_output_tokens": self.max_response_length,  # Response length limit
-            "token_level_generation": self.config.rollout.get(
-                "token_level_generation", False
-            ),  # This is new
-            "custom_tokenizer": self.config.rollout.get(
-                "custom_tokenizer", "Qwen/Qwen3-8B"
-            ),
+            "native_tool_calling": native_tool_calling,
+            # Randomness control
+            "temperature": self.config["temperature"],
+            # Nucleus sampling
+            "top_p": self.config["top_p"],
+            # Max tool calls
+            "max_iterations": self.full_config["grpo"]["max_rollout_turns"],
+            # Response length limit
+            # set at request time
+            # "max_output_tokens": self.max_response_length,
+            "token_level_generation": token_level_generation,
+            "custom_tokenizer": self.full_config["policy"]["tokenizer"],
             "max_model_len": self.total_len,
-            "ensure_thinking_end_properly": False
-            if self.config.rollout.get("token_level_generation", False)
-            else True,
+            "ensure_thinking_end_properly": ensure_thinking_end_properly,
         }
         # Parse and validate OpenHands server addresses
         # OpenHands servers handle multi-turn conversations with tool usage
-        openhands_base_urls = self.config.rollout.openhands_base_url
+        openhands_base_urls = openhands_base_url
         if isinstance(openhands_base_urls, str):
             # Support multiple URLs separated by '+'
             self.openhands_urls = [
@@ -179,97 +151,12 @@ class AsyncLLMServerManager:
 
         # Initialize chat template for message formatting
         # Different models require different conversation formats
-        self.chat_template_name = getattr(
-            self.config.rollout, "chat_template_name", "qwen3_chat_template_generation"
-        )
-        self.chat_template = get_chat_template(self.chat_template_name)
-        logger.info(f"Using chat template: {self.chat_template_name}")
+        # It is set at nemo_rl/algorithms/utils.py:get_tokenizer
+        self.chat_template = self.tokenizer.chat_template
 
-    def start_llm_servers(self):
-        """Start LLM server instances across the Ray cluster with proper resource allocation.
-
-        This method handles the complex process of starting distributed LLM servers:
-
-        1. Resource Discovery:
-           - Queries the Ray register center for worker node information
-           - Determines optimal server placement based on worker topology
-
-        2. Server Instantiation:
-           - Creates async server instances using the appropriate backend
-           - Applies node affinity scheduling to colocate servers with workers
-           - Handles naming and resource allocation
-
-        3. Error Handling and Retry:
-           - Implements retry logic for address conflicts
-           - Gracefully handles server startup failures
-           - Ensures all servers are successfully started before proceeding
-
-        4. Address Management:
-           - Collects and stores server HTTP addresses
-           - Maintains mapping between data parallel ranks and addresses
-
-        The method uses a retry loop to handle common startup issues like
-        port conflicts, ensuring robust server initialization.
-        """
-        # Get worker information from Ray register center
-        # This provides the mapping between worker ranks and node IDs
-        register_center = ray.get_actor(
-            f"{self.worker_group.name_prefix}_register_center"
-        )
-        workers_info = ray.get(register_center.get_worker_info.remote())
-        assert len(workers_info) == self.worker_group.world_size
-
-        # Get the appropriate server class based on rollout backend configuration
-        # This allows switching between different inference backends (vLLM, TensorRT-LLM, etc.)
-        from verl.nvidia.rollout.vllm_async_server import AsyncvLLMServer
-
-        # Start all server instances with retry logic for address conflicts
-        # Track which data parallel ranks still need successful server startup
-        unready_dp_ranks = set(range(self.rollout_dp_size))
-
-        while len(unready_dp_ranks) > 0:
-            # Create server instances for all unready ranks
-            servers = {
-                rollout_dp_rank: AsyncvLLMServer.options(
-                    # Ensure AsyncvLLMServer colocates with its corresponding workers
-                    # This optimizes memory usage and reduces network overhead
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        # Use the first worker in the tensor parallel group for this DP rank
-                        node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
-                        soft=False,  # Hard constraint - must run on this node
-                    ),
-                    # Assign unique name for Ray actor registry
-                    name=f"async_llm_server_{rollout_dp_rank}",
-                ).remote(
-                    self.full_config,  # Complete configuration
-                    self.rollout_dp_size,  # Total number of data parallel replicas
-                    rollout_dp_rank,  # This server's data parallel rank
-                    self.worker_group.name_prefix,  # Worker group identifier
-                )
-                for rollout_dp_rank in unready_dp_ranks
-            }
-
-            # Attempt to start each server and collect successful addresses
-            for rollout_dp_rank, server in servers.items():
-                try:
-                    # Get the HTTP server address from the started server
-                    # This is a blocking call that waits for server initialization
-                    address = ray.get(server.get_server_address.remote())
-
-                    # Store successful server reference and address
-                    self.server_addresses[rollout_dp_rank] = address
-                    self.async_llm_servers[rollout_dp_rank] = server
-
-                    # Remove from unready set - this server is now operational
-                    unready_dp_ranks.remove(rollout_dp_rank)
-
-                except Exception:
-                    # Server startup failed (likely port conflict), clean up and retry
-                    ray.kill(server)
-                    logger.error(
-                        f"rollout server {rollout_dp_rank} failed, maybe address already in use, restarting..."
-                    )
-
+    # ===============================================================================
+    # Assign LLM addresses to OpenHands servers
+    # ===============================================================================
     def assign_llm_addresses_to_openhands(self):
         """Distribute LLM server addresses to OpenHands servers for optimal load balancing.
 
@@ -421,11 +308,7 @@ class AsyncLLMServerManager:
         # Create async tasks for each address assignment
         for openhands_url, addresses in address_assignments.items():
             for address in addresses:
-                wrapped_address = (
-                    f"http://{address}"
-                    if self.config.rollout.get("token_level_generation", False)
-                    else f"http://{address}/v1"
-                )
+                wrapped_address = f"http://{address}"
                 task = self._add_llm_server_to_openhands(openhands_url, wrapped_address)
                 tasks.append(task)
 
@@ -503,32 +386,8 @@ class AsyncLLMServerManager:
             )
             raise
 
-    def wake_up(self):
-        """Wake up all vLLM instances from sleep mode.
-
-        This method activates all LLM servers that may have been put into sleep mode
-        for resource conservation. It's useful for resuming operations after
-        periods of inactivity.
-
-        The wake_up operation is performed synchronously across all servers to ensure
-        they are ready before returning control to the caller.
-        """
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
-
-    def sleep(self):
-        """Put all vLLM instances into sleep mode.
-
-        This method puts all LLM servers into a low-power state to conserve resources
-        when they are not actively processing requests. This is useful for:
-        - Reducing GPU memory usage during idle periods
-        - Conserving power in multi-tenant environments
-        - Allowing other processes to use GPU resources temporarily
-
-        The sleep operation is performed synchronously across all servers.
-        """
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
-
-    def _convert_results_to_dataproto(self, results) -> DataProto:
+    # ===============================================================================
+    def _convert_results_to_dataproto(self, results):
         """Convert OpenHands conversation results to DataProto format for training.
 
         This method performs complex data transformation to convert conversation results
@@ -843,7 +702,7 @@ class AsyncLLMServerManager:
 
         return result_dataproto
 
-    def _convert_results_to_dataproto_token(self, results) -> DataProto:
+    def _convert_results_to_dataproto_token(self, results):
         """Convert OpenHands conversation results to DataProto format for training.
 
         This method is another version of _convert_results_to_dataproto, where the messages contains token ids.
@@ -1130,7 +989,7 @@ class AsyncLLMServerManager:
 
         return result_dataproto
 
-    def DataProto2Messages(self, prompts: DataProto):
+    def DataProto2Messages(self, prompts):
         """Convert DataProto input to OpenHands message format.
 
         This method transforms the structured DataProto input into the message format
@@ -1167,7 +1026,7 @@ class AsyncLLMServerManager:
 
         return new_messages
 
-    def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
+    def generate_sequences(self, prompts, **sampling_params):
         """Generate multiple conversation sequences in parallel via OpenHands servers.
 
         This is the main entry point for conversation generation. It orchestrates
