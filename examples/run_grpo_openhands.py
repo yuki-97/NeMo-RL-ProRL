@@ -139,7 +139,7 @@ def main() -> None:
     ) = setup(config, tokenizer, dataset, val_dataset)
 
     # setup environment
-    task_to_env, val_task_to_env = setup_env(
+    env = setup_env(
         config,
         policy_generation,
         tokenizer,
@@ -152,8 +152,8 @@ def main() -> None:
         val_dataloader,
         tokenizer,
         loss_fn,
-        task_to_env,
-        val_task_to_env,
+        env,
+        env,
         logger,
         checkpointer,
         grpo_state,

@@ -430,6 +430,17 @@ def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
     return vllm_cfg.get("async_engine", False)
 
 
+def _should_use_rollout_in_env(master_config: MasterConfig) -> bool:
+    """Determine if rollouts should be run in the environment based on the configuration.
+
+    Returns True if rollouts should be run in the environment.
+    """
+    if "do_rollout_in_env" in master_config["env"]:
+        return master_config["env"]["do_rollout_in_env"]
+
+    return False
+
+
 def refit_policy_generation(
     policy: ColocatablePolicyInterface,
     policy_generation: GenerationInterface,
@@ -621,8 +632,13 @@ def grpo_train(
                         policy_generation.prepare_for_generation()
 
                 with timer.time("generation"):
+                    # Run rollouts in the environment
+                    if _should_use_rollout_in_env(master_config):
+                        repeated_batch, rollout_metrics = task_to_env.run_async_rollout(
+                            repeated_batch
+                        )
                     # Use async rollouts if vLLM async engine is enabled
-                    if _should_use_async_rollouts(master_config):
+                    elif _should_use_async_rollouts(master_config):
                         (
                             repeated_batch,
                             rollout_metrics,
@@ -998,8 +1014,11 @@ def validate(
                 break
 
             # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
+            # Run rollouts in the environment
+            if _should_use_rollout_in_env(master_config):
+                val_batch, gen_metrics = val_task_to_env.run_async_rollout(val_batch)
             # Use async rollouts if vLLM async engine is enabled
-            if _should_use_async_rollouts(master_config):
+            elif _should_use_async_rollouts(master_config):
                 val_batch, gen_metrics = run_async_multi_turn_rollout(
                     policy_generation,
                     val_batch,
