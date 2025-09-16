@@ -38,7 +38,7 @@ from nemo_rl.algorithms.utils import (
     set_seed,
 )
 from nemo_rl.data import DataConfig
-from nemo_rl.data.collate_fn import rl_collate_fn
+from nemo_rl.data.collate_fn import raw_data_collate_fn, rl_collate_fn
 from nemo_rl.data.datasets import AllTaskProcessedDataset
 from nemo_rl.data.interfaces import DatumSpec
 from nemo_rl.data.llm_message_utils import (
@@ -201,11 +201,12 @@ def setup(
     # ==========================
     #           Data
     # ==========================
+    use_raw_data = data_config.get("use_raw_data", False)
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=grpo_config["num_prompts_per_step"],
         shuffle=data_config["shuffle"],
-        collate_fn=rl_collate_fn,
+        collate_fn=raw_data_collate_fn if use_raw_data else rl_collate_fn,
         drop_last=True,
     )
     if last_checkpoint_path is not None:
@@ -227,7 +228,7 @@ def setup(
             val_dataset,
             batch_size=grpo_config["val_batch_size"],
             shuffle=False,
-            collate_fn=rl_collate_fn,
+            collate_fn=raw_data_collate_fn if use_raw_data else rl_collate_fn,
         )
         print(
             f"  ✓ Validation dataloader loaded with {len(val_dataset)} samples",
@@ -671,19 +672,24 @@ def grpo_train(
             with timer.time("total_step_time"):
                 # Prepare batch
                 print("▶ Preparing batch...", flush=True)
-                with timer.time("data_processing"):
-                    # Repeat batch items
-                    repeated_batch: BatchedDataDict[DatumSpec] = (
-                        batch.repeat_interleave(
-                            master_config["grpo"]["num_generations_per_prompt"]
+                if not master_config["data"].get("use_raw_data", False):
+                    with timer.time("data_processing"):
+                        # Repeat batch items
+                        repeated_batch: BatchedDataDict[DatumSpec] = (
+                            batch.repeat_interleave(
+                                master_config["grpo"]["num_generations_per_prompt"]
+                            )
                         )
-                    )
-                    # Convert LLMMessageLogType to FlatMessagesType for generation
-                    batched_flat, input_lengths = batched_message_log_to_flat_message(
-                        repeated_batch["message_log"],
-                        pad_value_dict={"token_ids": tokenizer.pad_token_id},
-                    )
-                    input_ids = batched_flat["token_ids"]
+                        # Convert LLMMessageLogType to FlatMessagesType for generation
+                        batched_flat, input_lengths = (
+                            batched_message_log_to_flat_message(
+                                repeated_batch["message_log"],
+                                pad_value_dict={"token_ids": tokenizer.pad_token_id},
+                            )
+                        )
+                        input_ids = batched_flat["token_ids"]
+                else:
+                    repeated_batch = batch
 
                 # Generate responses - this updates the LLMMessageLogType in repeated_batch
                 print(
