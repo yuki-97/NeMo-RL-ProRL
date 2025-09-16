@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import defaultdict
 from typing import Any, Optional, Union
 
 import torch
@@ -300,6 +301,24 @@ def preference_collate_fn(
         data["token_mask"] = cat_and_padded["token_loss_mask"]
 
     return data
+
+
+def raw_data_collate_fn(data_batch: list[DatumSpec]) -> BatchedDataDict[Any]:
+    """Collate function for raw data."""
+    tensor_dict = defaultdict(list)
+    non_tensor_dict = defaultdict(list)
+
+    for datum_spec in data_batch:
+        for key, value in datum_spec.items():
+            if isinstance(value, torch.Tensor):
+                tensor_dict[key].append(value)
+            else:
+                non_tensor_dict[key].append(value)
+
+    for key, value in tensor_dict.items():
+        tensor_dict[key] = torch.tensor(value)  # type: ignore
+
+    return BatchedDataDict(**tensor_dict, **non_tensor_dict)
 
 
 def assert_no_double_bos(token_ids: torch.Tensor, tokenizer: TokenizerType) -> None:
