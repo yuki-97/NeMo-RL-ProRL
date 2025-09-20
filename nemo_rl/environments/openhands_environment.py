@@ -7,6 +7,7 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig
+from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import _get_node_ip_local
 
 logger = logging.getLogger(__name__)
@@ -29,9 +30,9 @@ class OpenhandsEnvironment:
        - Handling multi-turn conversations with tool usage
 
     3. Request Processing:
-       - Converting DataProto inputs to message format
+       - Converting BatchedDataDict inputs to message format
        - Distributing requests across available servers
-       - Aggregating results and converting back to DataProto
+       - Aggregating results and converting back to BatchedDataDict
 
     4. Tokenization and Formatting:
        - Applying chat templates for different model types
@@ -128,7 +129,7 @@ class OpenhandsEnvironment:
             # set at request time
             # "max_output_tokens": self.max_response_length,
             "token_level_generation": token_level_generation,
-            "custom_tokenizer": self.full_config["policy"]["tokenizer"],
+            "custom_tokenizer": self.full_config["policy"]["tokenizer"]["name"],
             "max_model_len": self.total_len,
             "ensure_thinking_end_properly": ensure_thinking_end_properly,
         }
@@ -387,322 +388,9 @@ class OpenhandsEnvironment:
             raise
 
     # ===============================================================================
-    def _convert_results_to_dataproto(self, results):
-        """Convert OpenHands conversation results to DataProto format for training.
-
-        This method performs complex data transformation to convert conversation results
-        from OpenHands servers into the structured DataProto format required by the
-        training pipeline. The conversion process includes:
-
-        1. Result Organization:
-           - Groups results by instance ID and trajectory ID
-           - Handles missing or empty results with intelligent fallback
-           - Maintains consistent ordering matching the input batch
-
-        2. Message Processing:
-           - Extracts conversation messages from results
-           - Separates prompts from responses based on assistant messages
-           - Handles multi-turn conversations with tool usage
-
-        3. Tokenization:
-           - Applies chat templates for proper conversation formatting
-           - Tokenizes prompts and responses with appropriate masks
-           - Handles different tokenization requirements for prompts vs responses
-
-        4. Tensor Creation:
-           - Pads sequences to consistent lengths
-           - Converts to PyTorch tensors with proper attention masks
-           - Computes position IDs for transformer models
-
-        5. Data Packaging:
-           - Combines tensor and non-tensor data into DataProto
-           - Includes metadata like success flags, error messages, etc.
-           - Maintains batch structure for distributed training
-
-        Args:
-            results (dict): Dictionary with structure {instance_id: {trajectory_id: result_dict}}
-                Each result_dict contains:
-                - messages: List of conversation messages
-                - resolved: Boolean indicating if task was completed
-                - success: Boolean indicating if execution succeeded
-                - error: Optional error message
-                - tools: Optional tool definitions
-
-        Returns:
-            DataProto: Structured data containing:
-                - Tensor data: input_ids, attention_mask, position_ids, etc.
-                - Non-tensor data: success flags, error messages, metadata
-                - Proper formatting for downstream training/evaluation
-        """
-        # Initialize lists for non-tensor data collection
-        success_list = []
-        error_list = []
-        resolved_list = []
-        has_finish_action_list = []
-
-        # Create a mapping of instance_id -> list of trajectories for organization
-        instance_trajectories = {}
-        for instance_id, trajectories in results.items():
-            instance_trajectories[instance_id] = []
-            for trajectory_id, result in trajectories.items():
-                instance_trajectories[instance_id].append(result)
-
-        # Create final results in the same order as the input batch
-        # This ensures consistent ordering for training
-        matched_results = []
-        instance_list = []
-        for batch_item in self.batch:
-            instance_id = batch_item.non_tensor_batch["instance"]["instance_id"]
-            instance = batch_item.non_tensor_batch["instance"]
-            if instance_id in instance_trajectories:
-                # Add all trajectories for this instance
-                traj_results = instance_trajectories[instance_id]
-                matched_results.extend(traj_results)
-                instance_list.extend([instance] * len(traj_results))
-
-        # Validate that we have the expected number of results
-        expected_count = self.num_trajectories * len(self.batch)
-        assert len(matched_results) == expected_count, (
-            f"Expected {expected_count} results, got {len(matched_results)}"
-        )
-
-        # Group results by instance_id for intelligent message handling
-        results_by_instance = {}
-        for i, result in enumerate(matched_results):
-            instance_id = instance_list[i]["instance_id"]
-            if instance_id not in results_by_instance:
-                results_by_instance[instance_id] = []
-            results_by_instance[instance_id].append((i, result))
-
-        # Handle empty messages by copying from another trajectory of the same instance
-        # This provides robustness against individual trajectory failures
-        for instance_id, results in results_by_instance.items():
-            # Find a valid messages list to use as fallback
-            valid_messages = None
-            for _, result in results:
-                messages = result.get("messages", [])
-                if messages and len(messages) > 0:
-                    valid_messages = messages
-                    valid_resolved = result.get("resolved", False)
-                    valid_finish = result.get("finish", False)
-                    valid_error = result.get("error", None)
-                    break
-
-            # If we found valid messages, use them for trajectories with empty messages
-            if valid_messages:
-                for idx, result in results:
-                    if (
-                        not result.get("messages")
-                        or len(result.get("messages", [])) == 0
-                    ):
-                        print(
-                            f"Got empty messages for instance_id {instance_id}, trajectory {idx}. "
-                            f"Copying messages array from a valid trajectory."
-                        )
-                        # Copy messages from the valid trajectory
-                        matched_results[idx]["messages"] = valid_messages.copy()
-                        matched_results[idx]["resolved"] = valid_resolved
-                        matched_results[idx]["error"] = valid_error
-                        matched_results[idx]["finish"] = valid_finish
-                        matched_results[idx]["is_padded"] = (
-                            True  # Mark as padded sample
-                        )
-
-        # Initialize data structures for tokenization and tensor creation
-        all_messages = []
-        all_prompts = []
-        all_responses = []
-        prompt_encodings = {"input_ids": [], "attention_mask": []}
-        response_encodings = {
-            "input_ids": [],
-            "attention_mask": [],
-            "assistant_masks": [],
-        }
-        is_padded_list = []  # Track which samples are padded for training logic
-
-        # Process each result to extract and tokenize messages
-        for result in matched_results:
-            messages = result.get("messages", [])
-            all_messages.append(messages)
-
-            # Check if this is a padded sample (copied from another trajectory)
-            is_padded = result.get("is_padded", False)
-            is_padded_list.append(is_padded)
-
-            # Separate prompt from response based on first assistant message
-            # The prompt includes all messages before the first assistant response
-            starting_index = 0
-            for i, msg in enumerate(messages):
-                if msg["role"] == "assistant":
-                    starting_index = i
-                    break
-
-            if starting_index == 0:
-                # If no assistant message found, treat all messages as prompts
-                print(
-                    f"ERROR: Found no assistant message. len(messages) == {len(messages)} "
-                    f"and roles are {[msg['role'] for msg in messages]}"
-                )
-                starting_index = len(messages)
-
-            # Split into prompt and response parts
-            prompt = messages[:starting_index]
-            response = messages[starting_index:]
-            all_prompts.append(prompt)
-            all_responses.append(response)
-
-            # Collect non-tensor metadata
-            success_list.append(result.get("success", False))
-            error_list.append(result.get("error", None))
-            resolved_list.append(result.get("resolved", False))
-            has_finish_action_list.append(result.get("finish", False))
-
-            # Get tool definitions for this conversation
-            tools = result.get("tools", None)
-
-            # Tokenize the prompt using chat template
-            prompt_encoding = self.tokenizer.apply_chat_template(
-                prompt,
-                add_generation_prompt=False,
-                return_dict=True,
-                tools=tools,
-                chat_template=self.chat_template,
-            )
-
-            # Tokenize the full conversation with assistant mask
-            message_encoding = self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=False,
-                return_assistant_tokens_mask=True,  # Mark assistant tokens for loss calculation
-                return_dict=True,
-                tools=tools,
-                chat_template=self.chat_template,
-            )
-
-            # Extract response encoding by removing prompt portion
-            response_encoding = dict()
-            prompt_length = len(prompt_encoding["input_ids"])
-            response_encoding["input_ids"] = message_encoding["input_ids"][
-                prompt_length:
-            ]
-            response_encoding["attention_mask"] = message_encoding["attention_mask"][
-                prompt_length:
-            ]
-            response_encoding["assistant_masks"] = message_encoding["assistant_masks"][
-                prompt_length:
-            ]
-
-            # Store encodings for batch processing
-            response_encodings["input_ids"].append(response_encoding["input_ids"])
-            response_encodings["attention_mask"].append(
-                response_encoding["attention_mask"]
-            )
-            response_encodings["assistant_masks"].append(
-                response_encoding["assistant_masks"]
-            )
-            prompt_encodings["input_ids"].append(prompt_encoding["input_ids"])
-            prompt_encodings["attention_mask"].append(prompt_encoding["attention_mask"])
-
-        # Pad sequences to consistent lengths for batch processing
-
-        # Pad prompts to maximum prompt length in batch
-        max_len_prompt = max(
-            len(input_ids) for input_ids in prompt_encodings["input_ids"]
-        )
-        for idx in range(len(prompt_encodings["input_ids"])):
-            pad_length = max_len_prompt - len(prompt_encodings["input_ids"][idx])
-            prompt_encodings["input_ids"][idx].extend(
-                [self.tokenizer.pad_token_id] * pad_length
-            )
-            prompt_encodings["attention_mask"][idx].extend([0] * pad_length)
-
-        # Pad responses to maximum response length in batch
-        max_len_response = max(
-            len(input_ids) for input_ids in response_encodings["input_ids"]
-        )
-        for idx in range(len(response_encodings["input_ids"])):
-            pad_length = max_len_response - len(response_encodings["input_ids"][idx])
-            response_encodings["input_ids"][idx].extend(
-                [self.tokenizer.pad_token_id] * pad_length
-            )
-            response_encodings["attention_mask"][idx].extend([0] * pad_length)
-            response_encodings["assistant_masks"][idx].extend([0] * pad_length)
-
-        # Convert to PyTorch tensors and apply proper padding
-        prompt_input_ids = torch.tensor(
-            prompt_encodings["input_ids"], device=self.device
-        )
-        prompt_attention_mask = torch.tensor(
-            prompt_encodings["attention_mask"], device=self.device
-        )
-
-        # Convert right padding to left padding for prompts (required by some models)
-        prompt_input_ids, prompt_attention_mask = convert_right_padding_to_left(
-            self.tokenizer,
-            prompt_input_ids,
-            prompt_attention_mask,
-            self.device,
-            self.max_starting_message_length,
-        )
-
-        # Pad responses to total sequence length
-        response_ids, response_attention_mask, response_assistant_mask = (
-            pad_to_max_length_right(
-                self.tokenizer, response_encodings, self.total_len, self.device
-            )
-        )
-
-        # Combine prompts and responses into full sequences
-        input_ids = torch.cat([prompt_input_ids, response_ids], dim=1)
-        attention_mask = torch.cat(
-            [prompt_attention_mask, response_attention_mask], dim=1
-        )
-        position_ids = compute_position_id_with_mask(attention_mask)
-
-        # Log tensor shapes for debugging and validation
-        logger.info(
-            f"input_ids shape: {input_ids.shape}, response_ids shape: {response_ids.shape}, "
-            f"max_starting_message_length: {self.max_starting_message_length}, "
-            f"max_response_length: {self.total_len}"
-        )
-
-        # Validate tensor shape consistency
-        assert input_ids.shape[1] == attention_mask.shape[1] == position_ids.shape[1], (
-            f"Shape mismatch: input_ids {input_ids.shape}, attention_mask {attention_mask.shape}, "
-            f"position_ids {position_ids.shape}"
-        )
-        assert response_ids.shape[1] == response_assistant_mask.shape[1], (
-            f"Response shape mismatch: response_ids {response_ids.shape}, "
-            f"response_assistant_mask {response_assistant_mask.shape}"
-        )
-
-        # Create tensor dictionary for training
-        tensor_dict = {
-            "input_ids": input_ids,  # Full sequence tokens
-            "responses": response_ids,  # Response tokens only
-            "attention_mask": attention_mask,  # Attention mask for full sequence
-            "position_ids": position_ids,  # Position IDs for transformer
-            "loss_mask": response_assistant_mask,  # Mask for loss calculation
-        }
-
-        # Create non-tensor dictionary for metadata
-        non_tensor_dict = {
-            "success": success_list,  # Task completion status
-            "error": error_list,  # Error messages if any
-            "instance": instance_list,  # Original instance data
-            "resolved": resolved_list,  # Problem resolution status
-            "finish": has_finish_action_list,  # Finish action detection
-            "is_padded": is_padded_list,  # Padding indicators for training
-        }
-
-        # Create and return DataProto with combined tensor and non-tensor data
-        result_dataproto = DataProto.from_dict(
-            tensors=tensor_dict, non_tensors=non_tensor_dict
-        )
-
-        return result_dataproto
-
-    def _convert_results_to_dataproto_token(self, results):
+    # Formatting & Rollout
+    # ===============================================================================
+    def Results2BatchedDataDict(self, results: dict) -> BatchedDataDict:
         """Convert OpenHands conversation results to DataProto format for training.
 
         This method is another version of _convert_results_to_dataproto, where the messages contains token ids.
@@ -717,7 +405,7 @@ class OpenhandsEnvironment:
                 - tools: Optional tool definitions
 
         Returns:
-            DataProto: Structured data containing:
+            BatchedDataDict: Structured data containing:
                 - Tensor data: input_ids, attention_mask, position_ids, etc.
                 - Non-tensor data: success flags, error messages, metadata
                 - Proper formatting for downstream training/evaluation
@@ -982,22 +670,22 @@ class OpenhandsEnvironment:
             "is_padded": is_padded_list,  # Padding indicators for training
         }
 
-        # Create and return DataProto with combined tensor and non-tensor data
-        result_dataproto = DataProto.from_dict(
+        # Create and return BatchedDataDict with combined tensor and non-tensor data
+        result_dataproto = BatchedDataDict.from_dict(
             tensors=tensor_dict, non_tensors=non_tensor_dict
         )
 
         return result_dataproto
 
-    def DataProto2Messages(self, prompts):
-        """Convert DataProto input to OpenHands message format.
+    def BatchedDataDict2Messages(self, prompts: BatchedDataDict) -> list[dict]:
+        """Convert BatchedDataDict input to OpenHands message format.
 
-        This method transforms the structured DataProto input into the message format
+        This method transforms the structured BatchedDataDict input into the message format
         expected by OpenHands servers. It handles trajectory expansion to generate
         multiple conversation variants from each input prompt.
 
         Args:
-            prompts (DataProto): Input data containing instance information
+            prompts (BatchedDataDict): Input data containing instance information
                 Each instance typically contains:
                 - instance_id: Unique identifier for the problem instance
                 - Problem description, context, and other metadata
@@ -1013,7 +701,7 @@ class OpenhandsEnvironment:
         solution exploration and improved training data generation.
         """
         # Extract instance data from each prompt in the batch
-        messages = [prompt.non_tensor_batch["instance"] for prompt in prompts]
+        messages = prompts["instance"]
 
         # Expand each instance into multiple trajectories
         new_messages = []
@@ -1026,14 +714,14 @@ class OpenhandsEnvironment:
 
         return new_messages
 
-    def generate_sequences(self, prompts, **sampling_params):
+    def run_async_rollout(self, batch: BatchedDataDict) -> tuple[BatchedDataDict, dict]:
         """Generate multiple conversation sequences in parallel via OpenHands servers.
 
         This is the main entry point for conversation generation. It orchestrates
         the entire pipeline from input processing to result aggregation:
 
         1. Input Processing:
-           - Converts DataProto to OpenHands message format
+           - Converts BatchedDataDict to OpenHands message format
            - Expands single instances to multiple trajectories
 
         2. Parallel Generation:
@@ -1043,15 +731,15 @@ class OpenhandsEnvironment:
 
         3. Result Processing:
            - Aggregates responses from all servers
-           - Converts back to DataProto format
+           - Converts back to BatchedDataDict format
            - Includes timing information and metadata
 
         Args:
-            prompts (DataProto): Input batch containing problem instances
+            prompts (BatchedDataDict): Input batch containing problem instances
             **sampling_params: Additional parameters for generation (currently unused)
 
         Returns:
-            DataProto: Generated conversation sequences with:
+            BatchedDataDict: Generated conversation sequences with:
                 - Tensor data: tokenized conversations ready for training
                 - Non-tensor data: metadata, success flags, timing info
                 - meta_info: Detailed timing breakdown for performance analysis
@@ -1065,11 +753,11 @@ class OpenhandsEnvironment:
         total_start_time = time.time()
 
         # Store batch reference for result processing
-        self.batch = prompts
+        self.batch = batch
 
         # Time message conversion phase
         convert_start_time = time.time()
-        messages = self.DataProto2Messages(prompts)
+        messages = self.BatchedDataDict2Messages(batch)
         convert_end_time = time.time()
 
         # Time OpenHands request processing phase
@@ -1079,10 +767,7 @@ class OpenhandsEnvironment:
 
         # Time result conversion phase
         convert_results_start_time = time.time()
-        if self.config.rollout.get("token_level_generation", False):
-            response = self._convert_results_to_dataproto_token(output_messages)
-        else:
-            response = self._convert_results_to_dataproto(output_messages)
+        response = self.Results2BatchedDataDict(output_messages)
         convert_results_end_time = time.time()
         total_end_time = time.time()
 
@@ -1108,6 +793,9 @@ class OpenhandsEnvironment:
 
         return response
 
+    # ===============================================================================
+    # Helper Functions
+    # ===============================================================================
     async def clear_llm_servers(self):
         """Clear all LLM servers from OpenHands servers.
 
