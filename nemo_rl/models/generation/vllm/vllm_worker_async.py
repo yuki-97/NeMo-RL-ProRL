@@ -440,11 +440,16 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             }
         )
 
-        # Generate response
+        # Generate result
         async_generator = self.generate_async(data, max_new_tokens=max_new_tokens)
         async for _, result in async_generator:
             pass
 
+        # Convert result to dict
+        result = {
+            "response_ids": result["output_ids"][0].tolist(),
+            "logprobs": result["logprobs"][0].tolist(),
+        }
         return result
 
     async def report_device_id_async(self) -> list[str]:

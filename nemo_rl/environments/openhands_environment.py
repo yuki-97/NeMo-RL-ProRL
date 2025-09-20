@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import aiohttp
@@ -7,6 +9,7 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig
+from nemo_rl.data.llm_message_utils import _pad_tensor
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import _get_node_ip_local
 
@@ -73,7 +76,7 @@ class OpenhandsEnvironment:
         self.server_addresses = server_addresses
         self.dp_size = dp_size
 
-        # TODO: tmp for local testing
+        # TODO: tmp for test
         # stuffs need to be added in to env configs
         openhands_num_workers = 64
         native_tool_calling = True
@@ -390,293 +393,6 @@ class OpenhandsEnvironment:
     # ===============================================================================
     # Formatting & Rollout
     # ===============================================================================
-    def Results2BatchedDataDict(self, results: dict) -> BatchedDataDict:
-        """Convert OpenHands conversation results to DataProto format for training.
-
-        This method is another version of _convert_results_to_dataproto, where the messages contains token ids.
-
-        Args:
-            results (dict): Dictionary with structure {instance_id: {trajectory_id: result_dict}}
-                Each result_dict contains:
-                - messages: List of conversation messages, each message contains token ids.
-                - resolved: Boolean indicating if task was completed
-                - success: Boolean indicating if execution succeeded
-                - error: Optional error message
-                - tools: Optional tool definitions
-
-        Returns:
-            BatchedDataDict: Structured data containing:
-                - Tensor data: input_ids, attention_mask, position_ids, etc.
-                - Non-tensor data: success flags, error messages, metadata
-                - Proper formatting for downstream training/evaluation
-        """
-        # Initialize lists for non-tensor data collection
-        success_list = []
-        error_list = []
-        resolved_list = []
-        has_finish_action_list = []
-
-        # Create a mapping of instance_id -> list of trajectories for organization
-        instance_trajectories = {}
-        for instance_id, trajectories in results.items():
-            instance_trajectories[instance_id] = []
-            for trajectory_id, result in trajectories.items():
-                instance_trajectories[instance_id].append(result)
-
-        # Create final results in the same order as the input batch
-        # This ensures consistent ordering for training
-        matched_results = []
-        instance_list = []
-        for batch_item in self.batch:
-            instance_id = batch_item.non_tensor_batch["instance"]["instance_id"]
-            instance = batch_item.non_tensor_batch["instance"]
-            if instance_id in instance_trajectories:
-                # Add all trajectories for this instance
-                traj_results = instance_trajectories[instance_id]
-                matched_results.extend(traj_results)
-                instance_list.extend([instance] * len(traj_results))
-
-        # Validate that we have the expected number of results
-        expected_count = self.num_trajectories * len(self.batch)
-        assert len(matched_results) == expected_count, (
-            f"Expected {expected_count} results, got {len(matched_results)}"
-        )
-
-        # Group results by instance_id for intelligent message handling
-        results_by_instance = {}
-        for i, result in enumerate(matched_results):
-            instance_id = instance_list[i]["instance_id"]
-            if instance_id not in results_by_instance:
-                results_by_instance[instance_id] = []
-            results_by_instance[instance_id].append((i, result))
-
-        # Handle empty messages by copying from another trajectory of the same instance
-        # This provides robustness against individual trajectory failures
-        for instance_id, results in results_by_instance.items():
-            # Find a valid messages list to use as fallback
-            valid_messages = None
-            for _, result in results:
-                messages = result.get("messages", [])
-                if messages and len(messages) > 0:
-                    valid_messages = messages
-                    valid_resolved = result.get("resolved", False)
-                    valid_finish = result.get("finish", False)
-                    valid_error = result.get("error", None)
-                    break
-
-            # If we found valid messages, use them for trajectories with empty messages
-            if valid_messages:
-                for idx, result in results:
-                    if (
-                        not result.get("messages")
-                        or len(result.get("messages", [])) == 0
-                    ):
-                        print(
-                            f"Got empty messages for instance_id {instance_id}, trajectory {idx}. "
-                            f"Copying messages array from a valid trajectory."
-                        )
-                        # Copy messages from the valid trajectory
-                        matched_results[idx]["messages"] = valid_messages.copy()
-                        matched_results[idx]["resolved"] = valid_resolved
-                        matched_results[idx]["error"] = valid_error
-                        matched_results[idx]["finish"] = valid_finish
-                        matched_results[idx]["is_padded"] = (
-                            True  # Mark as padded sample
-                        )
-
-        # Initialize data structures for tokenization and tensor creation
-        prompt_encodings = {"input_ids": [], "attention_mask": [], "log_probs": []}
-        response_encodings = {
-            "input_ids": [],
-            "attention_mask": [],
-            "assistant_masks": [],
-            "log_probs": [],
-        }
-        is_padded_list = []  # Track which samples are padded for training logic
-
-        # Process each result to extract and tokenize messages
-        for result in matched_results:
-            messages = result.get("messages", [])
-
-            # Check if this is a padded sample (copied from another trajectory)
-            is_padded = result.get("is_padded", False)
-            is_padded_list.append(is_padded)
-
-            # Separate prompt from response based on first assistant message
-            # The prompt includes all messages before the first assistant response
-            starting_index = 0
-            for i, msg in enumerate(messages):
-                if msg["role"] == "assistant":
-                    starting_index = i
-                    break
-
-            if starting_index == 0:
-                # If no assistant message found, treat all messages as prompts
-                print(
-                    f"ERROR: Found no assistant message. len(messages) == {len(messages)} "
-                    f"and roles are {[msg['role'] for msg in messages]}"
-                )
-                starting_index = len(messages)
-
-            assert messages[-1]["role"] == "assistant", (
-                f"The last message should be an assistant message. "
-                f"len(messages) == {len(messages)} and roles are {[msg['role'] for msg in messages]}"
-            )
-
-            all_ids = [msg["token_ids"] for msg in messages]
-            all_log_probs = [
-                msg["logprobs"]
-                if "logprobs" in msg and msg["logprobs"] is not None
-                else [0.0] * len(msg["token_ids"])
-                for msg in messages
-            ]
-            # find assistant turn indices
-            assistant_turn_indices = []
-            for i, msg in enumerate(messages):
-                if msg["role"] == "assistant":
-                    assistant_turn_indices.append(i)
-            assistant_masks = [[0] * len(input_ids) for input_ids in all_ids]
-            for i in assistant_turn_indices:
-                assistant_masks[i] = [1] * len(all_ids[i])
-
-            # Split into prompt and response parts
-            prompt_ids = all_ids[:starting_index]
-            prompt_ids = sum(prompt_ids, [])
-            response_ids = all_ids[starting_index:]
-            response_ids = sum(response_ids, [])
-            assistant_masks = sum(assistant_masks, [])
-            len_prompt_ids = len(prompt_ids)
-            assistant_masks = assistant_masks[len_prompt_ids:]
-            attention_mask = [[1] * len(input_ids) for input_ids in all_ids]
-            attention_mask = sum(attention_mask, [])
-            prompt_attention_mask = attention_mask[:len_prompt_ids]
-            response_attention_mask = attention_mask[len_prompt_ids:]
-
-            response_log_probs = all_log_probs[starting_index:]
-            response_log_probs = sum(response_log_probs, [])
-
-            # Collect non-tensor metadata
-            success_list.append(result.get("success", False))
-            error_list.append(result.get("error", None))
-            resolved_list.append(result.get("resolved", False))
-            has_finish_action_list.append(result.get("finish", False))
-
-            # Store encodings for batch processing
-            response_encodings["input_ids"].append(response_ids)
-            response_encodings["attention_mask"].append(response_attention_mask)
-            response_encodings["assistant_masks"].append(assistant_masks)
-            response_encodings["log_probs"].append(response_log_probs)
-            prompt_encodings["input_ids"].append(prompt_ids)
-            prompt_encodings["attention_mask"].append(prompt_attention_mask)
-
-        # Pad sequences to consistent lengths for batch processing
-
-        # Pad prompts to maximum prompt length in batch
-        max_len_prompt = max(
-            len(input_ids) for input_ids in prompt_encodings["input_ids"]
-        )
-        for idx in range(len(prompt_encodings["input_ids"])):
-            pad_length = max_len_prompt - len(prompt_encodings["input_ids"][idx])
-            prompt_encodings["input_ids"][idx].extend(
-                [self.tokenizer.pad_token_id] * pad_length
-            )
-            prompt_encodings["attention_mask"][idx].extend([0] * pad_length)
-
-        # Pad responses to maximum response length in batch
-        max_len_response = max(
-            len(input_ids) for input_ids in response_encodings["input_ids"]
-        )
-        for idx in range(len(response_encodings["input_ids"])):
-            pad_length = max_len_response - len(response_encodings["input_ids"][idx])
-            response_encodings["input_ids"][idx].extend(
-                [self.tokenizer.pad_token_id] * pad_length
-            )
-            response_encodings["attention_mask"][idx].extend([0] * pad_length)
-            response_encodings["assistant_masks"][idx].extend([0] * pad_length)
-            response_encodings["log_probs"][idx].extend([0.0] * pad_length)
-
-        # Convert to PyTorch tensors and apply proper padding
-        prompt_input_ids = torch.tensor(
-            prompt_encodings["input_ids"], device=self.device
-        )
-        prompt_attention_mask = torch.tensor(
-            prompt_encodings["attention_mask"], device=self.device
-        )
-        # Convert right padding to left padding for prompts (required by some models)
-        prompt_input_ids, prompt_attention_mask = convert_right_padding_to_left(
-            self.tokenizer,
-            prompt_input_ids,
-            prompt_attention_mask,
-            self.device,
-            self.max_starting_message_length,
-        )
-
-        # Pad responses to total sequence length
-        (
-            response_ids,
-            response_attention_mask,
-            response_assistant_mask,
-            response_log_probs,
-        ) = pad_to_max_length_right(
-            self.tokenizer, response_encodings, self.total_len, self.device
-        )
-
-        # Combine prompts and responses into full sequences
-        input_ids = torch.cat([prompt_input_ids, response_ids], dim=1)
-        attention_mask = torch.cat(
-            [prompt_attention_mask, response_attention_mask], dim=1
-        )
-        position_ids = compute_position_id_with_mask(attention_mask)
-
-        # Log tensor shapes for debugging and validation
-        logger.info(
-            f"input_ids shape: {input_ids.shape}, response_ids shape: {response_ids.shape}, "
-            f"max_starting_message_length: {self.max_starting_message_length}, "
-            f"max_response_length: {self.total_len}"
-        )
-
-        # Validate tensor shape consistency
-        assert input_ids.shape[1] == attention_mask.shape[1] == position_ids.shape[1], (
-            f"Shape mismatch: input_ids {input_ids.shape}, attention_mask {attention_mask.shape}, "
-            f"position_ids {position_ids.shape}"
-        )
-        assert (
-            response_ids.shape[1]
-            == response_assistant_mask.shape[1]
-            == response_log_probs.shape[1]
-        ), (
-            f"Response shape mismatch: response_ids {response_ids.shape}, "
-            f"response_assistant_mask {response_assistant_mask.shape}, "
-            f"response_log_probs {response_log_probs.shape}"
-        )
-
-        # Create tensor dictionary for training
-        tensor_dict = {
-            "input_ids": input_ids,  # Full sequence tokens
-            "responses": response_ids,  # Response tokens only
-            "attention_mask": attention_mask,  # Attention mask for full sequence
-            "position_ids": position_ids,  # Position IDs for transformer
-            "loss_mask": response_assistant_mask,  # Mask for loss calculation
-            "rollout_log_probs": response_log_probs,  # Log probabilities for training
-        }
-
-        # Create non-tensor dictionary for metadata
-        non_tensor_dict = {
-            "success": success_list,  # Task completion status
-            "error": error_list,  # Error messages if any
-            "instance": instance_list,  # Original instance data
-            "resolved": resolved_list,  # Problem resolution status
-            "finish": has_finish_action_list,  # Finish action detection
-            "is_padded": is_padded_list,  # Padding indicators for training
-        }
-
-        # Create and return BatchedDataDict with combined tensor and non-tensor data
-        result_dataproto = BatchedDataDict.from_dict(
-            tensors=tensor_dict, non_tensors=non_tensor_dict
-        )
-
-        return result_dataproto
-
     def BatchedDataDict2Messages(self, prompts: BatchedDataDict) -> list[dict]:
         """Convert BatchedDataDict input to OpenHands message format.
 
@@ -714,6 +430,117 @@ class OpenhandsEnvironment:
 
         return new_messages
 
+    def Results2BatchedDataDict(self, results: dict) -> BatchedDataDict:
+        """Convert OpenHands conversation results to BatchedDataDict format for training.
+
+        Args:
+            results (dict): Dictionary with structure {instance_id: {trajectory_id: result_dict}}
+                Each result_dict contains:
+                - messages: List of conversation messages, each message contains token ids.
+                - resolved: Boolean indicating if task was completed
+                - success: Boolean indicating if execution succeeded
+                - error: Optional error message
+                - tools: Optional tool definitions
+
+        Returns:
+            BatchedDataDict: Structured data containing:
+                - prompt_ids, message_log, extra_env_info, task_name, total_reward, truncated, loss_multiplier
+                - Proper formatting for downstream training/evaluation
+        """
+
+        def split_prompt_and_response(
+            messages: list[dict],
+        ) -> tuple[list[dict], list[dict]]:
+            # Separate prompt from response based on first assistant message
+            # The prompt includes all messages before the first assistant response
+            starting_index = 0
+            for i, msg in enumerate(messages):
+                if msg["role"] == "assistant":
+                    starting_index = i
+                    break
+
+            if starting_index == 0:
+                # If no assistant message found, treat all messages as prompts
+                print(
+                    f"ERROR: Found no assistant message. len(messages) == {len(messages)} "
+                    f"and roles are {[msg['role'] for msg in messages]}"
+                )
+                starting_index = len(messages)
+
+            # Split into prompt and response parts
+            prompt = messages[:starting_index]
+            response = messages[starting_index:]
+
+            return prompt, response
+
+        def get_prompt_ids(messages: list[dict]) -> torch.Tensor:
+            prompt, _ = split_prompt_and_response(messages)
+            input_ids = torch.cat([msg["token_ids"] for msg in prompt])
+            return input_ids
+
+        result_dict = defaultdict(list)
+
+        # Create final results in the same order as the input batch
+        # This ensures consistent ordering for training
+        for instance in self.batch["instance"]:
+            instance_id = instance["instance_id"]
+
+            for trajectory in results[instance_id].values():
+                messages = trajectory["messages"]
+                for message in messages:
+                    message["token_ids"] = torch.tensor(
+                        message["token_ids"], dtype=torch.int64
+                    )
+
+                success = trajectory.get("success", False)
+
+                # append to result_dict
+                result_dict["message_log"].append(messages)
+                result_dict["prompt_ids"].append(get_prompt_ids(messages))
+                # prompt length
+                result_dict["length"].append(len(result_dict["prompt_ids"]))
+                result_dict["extra_env_info"].append(
+                    {
+                        "success": success,
+                        "error": trajectory.get("error", None),
+                        "instance": instance,
+                        "resolved": trajectory.get("resolved", False),
+                        "finish": trajectory.get("finish", False),
+                        # TODO
+                        "is_padded": False,
+                    }
+                )
+                result_dict["task_name"].append("openhands")
+                # TODO
+                result_dict["total_reward"].append(int(success))
+                # result_dict["idx"].append(trajectory["idx"])
+                result_dict["truncated"].append(trajectory["end_properly"])
+                # TODO: check
+                result_dict["loss_multiplier"].append(1.0)
+
+        # concat prompt_ids
+        prompt_ids = result_dict["prompt_ids"]
+        pad_value = self.tokenizer.pad_token_id
+        max_len = max(len(data) for data in prompt_ids)
+        padded_prompt_ids = [
+            _pad_tensor(data, max_len, "right", pad_value) for data in prompt_ids
+        ]
+        result_dict["prompt_ids"] = torch.stack(padded_prompt_ids)
+
+        # convert to tensors
+        result_dict["length"] = torch.tensor(result_dict["length"], dtype=torch.int32)
+        result_dict["total_reward"] = torch.tensor(
+            result_dict["total_reward"], dtype=torch.float32
+        )
+        result_dict["truncated"] = torch.tensor(
+            result_dict["truncated"], dtype=torch.bool
+        )
+        result_dict["loss_multiplier"] = torch.tensor(
+            result_dict["loss_multiplier"], dtype=torch.bool
+        )
+
+        return BatchedDataDict(result_dict)
+
     def run_async_rollout(self, batch: BatchedDataDict) -> tuple[BatchedDataDict, dict]:
         """Generate multiple conversation sequences in parallel via OpenHands servers.
 
@@ -747,8 +574,6 @@ class OpenhandsEnvironment:
         The method includes comprehensive timing instrumentation to help
         identify performance bottlenecks in the generation pipeline.
         """
-        import time
-
         # Start total timing for performance analysis
         total_start_time = time.time()
 
@@ -760,10 +585,18 @@ class OpenhandsEnvironment:
         messages = self.BatchedDataDict2Messages(batch)
         convert_end_time = time.time()
 
+        logger.info(
+            f"BatchedDataDict2Messages time: {convert_end_time - convert_start_time:.3f}s"
+        )
+
         # Time OpenHands request processing phase
         request_start_time = time.time()
         output_messages = asyncio.run(self.request_from_openhands(messages))
         request_end_time = time.time()
+
+        logger.info(
+            f"request_from_openhands time: {request_end_time - request_start_time:.3f}s"
+        )
 
         # Time result conversion phase
         convert_results_start_time = time.time()
@@ -771,27 +604,31 @@ class OpenhandsEnvironment:
         convert_results_end_time = time.time()
         total_end_time = time.time()
 
-        # Log detailed timing information for performance monitoring
         logger.info(
-            f"convert_results_to_dataproto time: {convert_results_end_time - convert_results_start_time:.3f}s"
+            f"Results2BatchedDataDict time: {convert_results_end_time - convert_results_start_time:.3f}s"
         )
+        logger.info(f"Total rollout time: {total_end_time - total_start_time:.3f}s")
 
-        # Ensure meta_info exists for timing data
-        if not hasattr(response, "meta_info") or response.meta_info is None:
-            response.meta_info = {}
-
-        # Add comprehensive timing breakdown
-        response.meta_info["timing"] = {
-            "total": total_end_time - total_start_time,
-            "convert_messages": convert_end_time - convert_start_time,
-            "openhands_request": request_end_time - request_start_time,
-            "convert_results_to_dataproto": convert_results_end_time
-            - convert_results_start_time,
-            "generate_sequences": total_end_time
-            - total_start_time,  # Main timing metric
+        # TODO: Aggregate metrics across all samples
+        rollout_metrics = {
+            # Overall metrics
+            "total_turns": None,
+            "avg_turns_per_sample": None,
+            "max_turns_per_sample": None,
+            "natural_termination_rate": None,
+            "truncation_rate": None,
+            "max_turns_reached_rate": None,
+            # Token usage metrics
+            "mean_total_tokens_per_sample": None,
+            "mean_gen_tokens_per_sample": None,
+            "mean_env_tokens_per_sample": None,
+            # Reward metrics
+            "mean_total_reward": None,
+            "max_total_reward": None,
+            "min_total_reward": None,
         }
 
-        return response
+        return response, rollout_metrics
 
     # ===============================================================================
     # Helper Functions
