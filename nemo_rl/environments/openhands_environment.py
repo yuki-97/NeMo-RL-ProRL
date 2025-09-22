@@ -115,6 +115,7 @@ class OpenhandsEnvironment:
 
         # Configure sampling parameters for generation
         # These parameters control the randomness and quality of generated text
+        self.max_turns = self.full_config["grpo"]["max_rollout_turns"]
         self.sampling_params = {
             "model": f"hosted_vllm/{model_name}",
             # Placeholder for local servers
@@ -127,7 +128,7 @@ class OpenhandsEnvironment:
             # Nucleus sampling
             "top_p": self.config["top_p"],
             # Max tool calls
-            "max_iterations": self.full_config["grpo"]["max_rollout_turns"],
+            "max_iterations": self.max_turns,
             # Response length limit
             # set at request time
             # "max_output_tokens": self.max_response_length,
@@ -503,7 +504,7 @@ class OpenhandsEnvironment:
                     {
                         "success": success,
                         "error": trajectory.get("error", None),
-                        "instance": instance,
+                        # "instance": instance,
                         "resolved": trajectory.get("resolved", False),
                         "finish": trajectory.get("finish", False),
                         # TODO
@@ -540,6 +541,61 @@ class OpenhandsEnvironment:
         )
 
         return BatchedDataDict(result_dict)
+
+    def calculate_metrics(self, batch: BatchedDataDict) -> dict:
+        """Calculate metrics for the batch.
+
+        Args:
+            batch (BatchedDataDict): The batch to calculate metrics for
+
+        Returns:
+            dict: The metrics for the batch
+        """
+        batch_size = len(batch["message_log"])
+
+        turns = []
+        max_turns_reached = []
+        total_tokens = []
+        assistant_tokens = []
+        env_tokens = []
+        for messages in batch["message_log"]:
+            turn = 0
+            total_token = 0
+            assistant_token = 0
+            env_token = 0
+            for idx, message in enumerate(messages):
+                total_token += len(message["token_ids"])
+                if message["role"] == "assistant":
+                    turn += 1
+                    assistant_token += len(message["token_ids"])
+                elif idx >= 2:
+                    env_token += len(message["token_ids"])
+            turns.append(turn)
+            max_turns_reached.append(turn == self.max_turns)
+            total_tokens.append(total_token)
+            assistant_tokens.append(assistant_token)
+            env_tokens.append(env_token)
+
+        rollout_metrics = {
+            # Overall metrics
+            "total_turns": sum(turns),
+            "avg_turns_per_sample": sum(turns) / batch_size,
+            "max_turns_per_sample": max(turns),
+            # TODO: check the logic of terminate and truncated
+            "natural_termination_rate": batch["truncated"].float().mean().item(),
+            "truncation_rate": batch["truncated"].float().mean().item(),
+            "max_turns_reached_rate": sum(max_turns_reached) / batch_size,
+            # Token usage metrics
+            "mean_total_tokens_per_sample": sum(total_tokens) / batch_size,
+            "mean_gen_tokens_per_sample": sum(assistant_tokens) / batch_size,
+            "mean_env_tokens_per_sample": sum(env_tokens) / batch_size,
+            # Reward metrics
+            "mean_total_reward": batch["total_reward"].float().mean().item(),
+            "max_total_reward": batch["total_reward"].float().max().item(),
+            "min_total_reward": batch["total_reward"].float().min().item(),
+        }
+
+        return rollout_metrics
 
     def run_async_rollout(self, batch: BatchedDataDict) -> tuple[BatchedDataDict, dict]:
         """Generate multiple conversation sequences in parallel via OpenHands servers.
@@ -601,6 +657,7 @@ class OpenhandsEnvironment:
         # Time result conversion phase
         convert_results_start_time = time.time()
         response = self.Results2BatchedDataDict(output_messages)
+        rollout_metrics = self.calculate_metrics(response)
         convert_results_end_time = time.time()
         total_end_time = time.time()
 
@@ -608,25 +665,6 @@ class OpenhandsEnvironment:
             f"Results2BatchedDataDict time: {convert_results_end_time - convert_results_start_time:.3f}s"
         )
         logger.info(f"Total rollout time: {total_end_time - total_start_time:.3f}s")
-
-        # TODO: Aggregate metrics across all samples
-        rollout_metrics = {
-            # Overall metrics
-            "total_turns": None,
-            "avg_turns_per_sample": None,
-            "max_turns_per_sample": None,
-            "natural_termination_rate": None,
-            "truncation_rate": None,
-            "max_turns_reached_rate": None,
-            # Token usage metrics
-            "mean_total_tokens_per_sample": None,
-            "mean_gen_tokens_per_sample": None,
-            "mean_env_tokens_per_sample": None,
-            # Reward metrics
-            "mean_total_reward": None,
-            "max_total_reward": None,
-            "min_total_reward": None,
-        }
 
         return response, rollout_metrics
 
