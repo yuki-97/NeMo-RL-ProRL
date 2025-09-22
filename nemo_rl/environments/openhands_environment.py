@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import Dict, List, Tuple
@@ -76,15 +77,9 @@ class OpenhandsEnvironment:
         self.server_addresses = server_addresses
         self.dp_size = dp_size
 
-        # TODO: tmp for test
-        # stuffs need to be added in to env configs
-        openhands_num_workers = 64
-        native_tool_calling = True
         # current implementation only supports token level generation
-        token_level_generation = True
-        ensure_thinking_end_properly = token_level_generation
-        local_ip = _get_node_ip_local()
-        openhands_base_url = f"http://{local_ip}:8006"
+        token_level_generation = self.config.get("token_level_generation", True)
+        assert token_level_generation, "Only token level generation is supported now."
 
         # Extract generation and processing parameters
         # Number of trajectories per prompt
@@ -96,19 +91,19 @@ class OpenhandsEnvironment:
         # Use the tokenizer passed in the constructor
         self.tokenizer = tokenizer
 
-        # TODO: support prompt, response, start length
         # Set sequence length constraints from configuration
-        self.max_prompt_length = self.config["vllm_cfg"]["max_model_len"]
-        # set at request time
-        # self.max_response_length = None
+        self.max_prompt_length = self.config["max_prompt_length"]
+        self.max_response_length = self.config["max_response_length"]
         self.total_len = self.config["vllm_cfg"]["max_model_len"]
-        self.max_starting_message_length = self.config["vllm_cfg"]["max_model_len"]
+        assert self.max_prompt_length + self.max_response_length <= self.total_len
+        # TODO: check
+        self.max_starting_message_length = None
 
         # Use CPU device for tensor operations (data preparation)
         self.device = torch.device("cpu")
 
         # OpenHands worker configuration for parallel processing
-        self.openhands_num_workers = openhands_num_workers
+        self.openhands_num_workers = self.config.get("openhands_num_workers", 64)
 
         # Extract model name from path for API identification
         model_name = "/".join(self.full_config["policy"]["model_name"].split("/")[-2:])
@@ -122,7 +117,7 @@ class OpenhandsEnvironment:
             "api_key": "dummy_key",
             "modify_params": False,
             "log_completions": False,
-            "native_tool_calling": native_tool_calling,
+            "native_tool_calling": self.config.get("native_tool_calling", True),
             # Randomness control
             "temperature": self.config["temperature"],
             # Nucleus sampling
@@ -130,16 +125,21 @@ class OpenhandsEnvironment:
             # Max tool calls
             "max_iterations": self.max_turns,
             # Response length limit
-            # set at request time
-            # "max_output_tokens": self.max_response_length,
+            "max_output_tokens": self.max_response_length,
             "token_level_generation": token_level_generation,
             "custom_tokenizer": self.full_config["policy"]["tokenizer"]["name"],
             "max_model_len": self.total_len,
-            "ensure_thinking_end_properly": ensure_thinking_end_properly,
+            "ensure_thinking_end_properly": not token_level_generation,
+            "strict_loop_detector": self.config.get("strict_loop_detector", True),
+            "is_reasoning_task": self.config.get("is_reasoning_task", False),
         }
         # Parse and validate OpenHands server addresses
         # OpenHands servers handle multi-turn conversations with tool usage
-        openhands_base_urls = openhands_base_url
+        openhands_base_urls = os.environ.get("OPENHANDS_URLS", None)
+        if openhands_base_urls is None:
+            local_ip = _get_node_ip_local()
+            openhands_base_urls = f"http://{local_ip}:8006"
+
         if isinstance(openhands_base_urls, str):
             # Support multiple URLs separated by '+'
             self.openhands_urls = [
