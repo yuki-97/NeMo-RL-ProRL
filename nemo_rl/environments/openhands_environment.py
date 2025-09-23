@@ -449,6 +449,34 @@ class OpenhandsEnvironment:
                 - Proper formatting for downstream training/evaluation
         """
 
+        def handle_empty_messages(results: dict, instance_id: str):
+            # Find a valid messages list to use as fallback
+            valid_messages = None
+            for result in results[instance_id].values():
+                messages = result.get("messages", [])
+                if messages and len(messages) > 0:
+                    valid_messages = messages
+                    valid_resolved = result.get("resolved", False)
+                    valid_finish = result.get("finish", False)
+                    valid_error = result.get("error", None)
+                    break
+
+            # If we found valid messages, use them for trajectories with empty messages
+            if valid_messages:
+                for idx, result in results[instance_id].items():
+                    if len(result.get("messages", [])) == 0:
+                        print(
+                            f"Got empty messages for instance_id {instance_id}, trajectory {idx}. "
+                            f"Copying messages array from a valid trajectory."
+                        )
+                        # Copy messages from the valid trajectory
+                        results[instance_id][idx]["messages"] = valid_messages.copy()
+                        results[instance_id][idx]["resolved"] = valid_resolved
+                        results[instance_id][idx]["error"] = valid_error
+                        results[instance_id][idx]["finish"] = valid_finish
+                        # Mark as padded sample
+                        results[instance_id][idx]["is_padded"] = True
+
         def split_prompt_and_response(
             messages: list[dict],
         ) -> tuple[list[dict], list[dict]]:
@@ -476,7 +504,10 @@ class OpenhandsEnvironment:
 
         def get_prompt_ids(messages: list[dict]) -> torch.Tensor:
             prompt, _ = split_prompt_and_response(messages)
-            input_ids = torch.cat([msg["token_ids"] for msg in prompt])
+            if len(prompt) != 0:
+                input_ids = torch.cat([msg["token_ids"] for msg in prompt])
+            else:
+                input_ids = torch.tensor([])
             return input_ids
 
         result_dict = defaultdict(list)
@@ -486,8 +517,12 @@ class OpenhandsEnvironment:
         for instance in self.batch["instance"]:
             instance_id = instance["instance_id"]
 
+            # Handle empty messages by copying from another trajectory of the same instance
+            # This provides robustness against individual trajectory failures
+            handle_empty_messages(results, instance_id)
+
             for trajectory in results[instance_id].values():
-                messages = trajectory["messages"]
+                messages = trajectory.get("messages", [])
                 for message in messages:
                     message["token_ids"] = torch.tensor(
                         message["token_ids"], dtype=torch.int64
@@ -507,15 +542,14 @@ class OpenhandsEnvironment:
                         # "instance": instance,
                         "resolved": trajectory.get("resolved", False),
                         "finish": trajectory.get("finish", False),
-                        # TODO
-                        "is_padded": False,
+                        "is_padded": trajectory.get("is_padded", False),
                     }
                 )
                 result_dict["task_name"].append("openhands")
                 # TODO
                 result_dict["total_reward"].append(int(success))
                 # result_dict["idx"].append(trajectory["idx"])
-                result_dict["truncated"].append(trajectory["end_properly"])
+                result_dict["truncated"].append(trajectory.get("end_properly", False))
                 # TODO: check
                 result_dict["loss_multiplier"].append(1.0)
 
