@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import Dict, List, Tuple
@@ -84,7 +85,7 @@ class OpenhandsEnvironment:
         token_level_generation = True
         ensure_thinking_end_properly = token_level_generation
         local_ip = _get_node_ip_local()
-        openhands_base_url = f"http://{local_ip}:8006"
+        openhands_base_url = os.environ.get("OPENHANDS_URLS", f"http://{local_ip}:8006")
 
         # Extract generation and processing parameters
         # Number of trajectories per prompt

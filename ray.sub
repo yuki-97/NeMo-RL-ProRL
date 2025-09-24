@@ -197,6 +197,36 @@ head_node_ip=${ip_addresses_array[0]}
 
 ip_head=$head_node_ip:$PORT
 
+# Start OpenHands on all nodes
+openhands_urls=""
+for i in "${!nodes_array[@]}"; do
+    node=${nodes_array[$i]}
+    node_ip=${ip_addresses_array[$i]}
+
+    # Start OpenHands server on this node in background
+    srun --nodes=1 --ntasks=1 -w $node \
+        --no-container-mount-home --container-image=$CONTAINER --container-mounts=$MOUNTS \
+        -o $LOG_DIR/openhands-worker-$i.out -e $LOG_DIR/openhands-worker-$i.err \
+        bash -c "cd $OPENHANDS_DIR \
+            && export PYTHONPATH=$OPENHANDS_DIR \
+            && export OH_RUNTIME_SINGULARITY_IMAGE_REPO=$OH_RUNTIME_SINGULARITY_IMAGE_REPO \
+            && export LOG_LEVEL=ERROR \
+            && export DEBUG=False \
+            && nohup python scripts/start_server.py --port 8006 --max-init-workers 70 --max-run-workers 64 --timeout 9999999" &
+
+    # Build the URLs string
+    if [ -z "$openhands_urls" ]; then
+        openhands_urls="http://$node_ip:8006"
+    else
+        openhands_urls="$openhands_urls+http://$node_ip:8006"
+    fi
+done
+
+# Add the OpenHands URLs to the command
+if [[ -n "$COMMAND" && -n "$openhands_urls" ]]; then
+    COMMAND="OPENHANDS_URLS=$openhands_urls ${COMMAND}"
+fi
+
 # First we start the head of the ray cluster on one of the physical nodes
 # Give the head node actual resources to make it schedulable
 
@@ -263,6 +293,7 @@ log-sync-sidecar &
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 
 cat <<EOFINNER | tee /launch-head.sh
+pip install uv
 ray start --head \
     --disable-usage-stats \
     --resources="{\"worker_units\": $GPUS_PER_NODE, \"slurm_managed_ray_cluster\": 1}" \
@@ -294,7 +325,7 @@ touch $LOG_DIR/ENDED
 exit 1
 EOF
 )
-srun $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
+srun --overlap $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
 SRUN_PIDS["ray-head"]=$!
 
 NUM_ACTORS=$((GPUS_PER_NODE * SLURM_JOB_NUM_NODES))
@@ -365,6 +396,7 @@ log-sync-sidecar &
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 
 cat <<EOFINNER | tee /launch-worker.sh
+pip install uv
 ray start --address "$ip_head" \
           --disable-usage-stats \
           --resources="{\"worker_units\": $GPUS_PER_NODE, \"slurm_managed_ray_cluster\": 1}" \
@@ -392,7 +424,7 @@ touch $LOG_DIR/ENDED
 exit 1
 EOF
 )
-  srun $COMMON_SRUN_ARGS --container-name=ray-worker-$i --exact --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$node_i" -o $LOG_DIR/ray-worker-$i.log bash -x -c "$worker_cmd" &
+  srun --overlap $COMMON_SRUN_ARGS --container-name=ray-worker-$i --exact --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$node_i" -o $LOG_DIR/ray-worker-$i.log bash -x -c "$worker_cmd" &
   SRUN_PIDS["ray-worker-$i"]=$!
   sleep 3
 done
