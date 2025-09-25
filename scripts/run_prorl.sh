@@ -32,13 +32,16 @@ uv run python examples/run_grpo_openhands.py \
     grpo.max_rollout_turns=2 \
     loss_fn.reference_policy_kl_penalty=0.001 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
-    policy.max_total_sequence_length=32768 \
+    policy.max_total_sequence_length=8192 \
     policy.train_global_batch_size=16 \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
     policy.dtensor_cfg.activation_checkpointing=true \
+    policy.dtensor_cfg.cpu_offload=true \
     ++policy.generation.openhands_num_workers=${OPENHANDS_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
+    ++policy.generation.max_prompt_length=6656 \
+    ++policy.generation.max_response_length=1536 \
     policy.generation.vllm_cfg.async_engine=true \
     ++policy.generation.vllm_cfg.expose_http_server=true \
     policy.dynamic_batching.enabled=false \

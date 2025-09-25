@@ -91,13 +91,13 @@ class OpenhandsEnvironment:
         # Use the tokenizer passed in the constructor
         self.tokenizer = tokenizer
 
-        # TODO: support prompt, response, start length
         # Set sequence length constraints from configuration
-        self.max_prompt_length = self.config["vllm_cfg"]["max_model_len"]
-        # set at request time
-        # self.max_response_length = None
+        self.max_prompt_length = self.config["max_prompt_length"]
+        self.max_response_length = self.config["max_response_length"]
         self.total_len = self.config["vllm_cfg"]["max_model_len"]
-        self.max_starting_message_length = self.config["vllm_cfg"]["max_model_len"]
+        assert self.max_prompt_length + self.max_response_length <= self.total_len
+        # TODO: check
+        self.max_starting_message_length = None
 
         # Use CPU device for tensor operations (data preparation)
         self.device = torch.device("cpu")
@@ -125,8 +125,7 @@ class OpenhandsEnvironment:
             # Max tool calls
             "max_iterations": self.max_turns,
             # Response length limit
-            # set at request time
-            # "max_output_tokens": self.max_response_length,
+            "max_output_tokens": self.max_response_length,
             "token_level_generation": token_level_generation,
             "custom_tokenizer": self.full_config["policy"]["tokenizer"]["name"],
             "max_model_len": self.total_len,
