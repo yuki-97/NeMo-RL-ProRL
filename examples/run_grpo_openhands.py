@@ -34,6 +34,36 @@ from nemo_rl.utils.logger import get_next_experiment_dir
 OmegaConf.register_new_resolver("mul", lambda a, b: a * b)
 
 
+def format_instance(item: dict) -> dict:
+    if "instance" in item:
+        return item
+
+    # we copy instance data to 'instance' key for agent training delegating to openhands.
+    # swebench tasks already have 'instance' key.
+    original_keys = list(item.keys())
+    item["instance"] = item.copy()
+
+    # add instance_id to the instance
+    instance = item["instance"]
+    if "instance_id" not in instance:
+        data_source = instance.get("data_source", "unknown")
+        if "extra_info" in instance:
+            split = instance["extra_info"].get("split", "unknown")
+            index = instance["extra_info"].get("index", "unknown")
+            name = instance["extra_info"].get("name", "unknown")
+        else:
+            split = "unknown"
+            index = "unknown"
+            name = "unknown"
+        item["instance"]["instance_id"] = f"{data_source}_{name}_{split}_{index}"
+
+    # remove original keys
+    for key in original_keys:
+        item.pop(key)
+
+    return item
+
+
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Run GRPO training with configuration")
@@ -50,10 +80,14 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 def setup_data(data_config: DataConfig) -> tuple[Dataset, Optional[Dataset]]:
     dataset = load_dataset("parquet", data_files=data_config["train_data_path"])
     dataset = dataset["train"]
+    if "instance" not in dataset.column_names:
+        dataset = dataset.map(format_instance)
 
     if "val_data_path" in data_config:
         val_dataset = load_dataset("parquet", data_files=data_config["val_data_path"])
         val_dataset = val_dataset["train"]
+        if "instance" not in val_dataset.column_names:
+            val_dataset = val_dataset.map(format_instance)
     else:
         val_dataset = None
 
