@@ -197,14 +197,35 @@ head_node_ip=${ip_addresses_array[0]}
 
 ip_head=$head_node_ip:$PORT
 
-# Start OpenHands on all nodes
+# ==================== Start Reward Server on all nodes ====================
+echo "Starting Reward servers on all nodes..."
+CODE_SANDBOX_IMAGE="/lustre/fsw/portfolios/nvr/users/jianh/data/images/code_sandbox+dev.sqsh"
+CODE_SANDBOX_MOUNTS="/lustre:/lustre,${VERL_DIR}:/verl"
+GYM_SANDBOX_IMAGE="/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+reasoninggym.sqsh"
+for i in "${!nodes_array[@]}"; do
+    node=${nodes_array[$i]}
+    # start code sandbox with 64 cpus
+    srun --nodes=1 --cpus-per-task=64 --ntasks=1 -w $node \
+        --no-container-mount-home --container-image=$CODE_SANDBOX_IMAGE --container-mounts=$CODE_SANDBOX_MOUNTS \
+        -o "$LOG_DIR/sandbox-code-%j-worker-node-$i.out" -e "$LOG_DIR/sandbox-code-%j-worker-node-$i.err" \
+        bash -c "cd /workspace && export PYTHONPATH=/verl && python /verl/verl/nvidia/remote_reward_server/launch_default_reward_server.py" &
+    # # start reasoning sandbox with 2 cpus
+    # srun --overlap --nodes=1 --cpus-per-task=2 --mem=524288M --ntasks=1 -w $node \
+    #     -o "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.out" -e "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.err" \
+    #     --no-container-mount-home --container-image=${GYM_SANDBOX_IMAGE} \
+    #     bash -c "python scripts/host_reward_server.py" &
+done
+sleep 10s
+
+# ==================== Start OpenHands on all nodes ====================
+echo "Starting OpenHands servers on all nodes..."
 openhands_urls=""
 for i in "${!nodes_array[@]}"; do
     node=${nodes_array[$i]}
     node_ip=${ip_addresses_array[$i]}
 
     # Start OpenHands server on this node in background
-    srun --nodes=1 --ntasks=1 -w $node \
+    srun --overlap --nodes=1 --ntasks=1 -w $node \
         --no-container-mount-home --container-image=$CONTAINER --container-mounts=$MOUNTS \
         -o $LOG_DIR/openhands-worker-$i.out -e $LOG_DIR/openhands-worker-$i.err \
         bash -c "cd $OPENHANDS_DIR \
@@ -212,7 +233,7 @@ for i in "${!nodes_array[@]}"; do
             && export OH_RUNTIME_SINGULARITY_IMAGE_REPO=$OH_RUNTIME_SINGULARITY_IMAGE_REPO \
             && export LOG_LEVEL=ERROR \
             && export DEBUG=False \
-            && nohup python scripts/start_server.py --port 8006 --max-init-workers 70 --max-run-workers 64 --timeout 9999999" &
+            && nohup python scripts/start_server.py --max-init-workers ${OPENHANDS_SERVER_INIT_WORKERS} --max-run-workers ${OPENHANDS_SERVER_RUN_WORKERS} --max-eval-workers ${OPENHANDS_SERVER_INIT_WORKERS} --timeout ${OPENHANDS_TIMEOUT} --reward-server-ip localhost --use-thread-based-server" &
 
     # Build the URLs string
     if [ -z "$openhands_urls" ]; then
@@ -223,6 +244,7 @@ for i in "${!nodes_array[@]}"; do
 done
 
 # Add the OpenHands URLs to the command
+echo "OPENHANDS_URLS=$openhands_urls"
 if [[ -n "$COMMAND" && -n "$openhands_urls" ]]; then
     COMMAND="OPENHANDS_URLS=$openhands_urls ${COMMAND}"
 fi

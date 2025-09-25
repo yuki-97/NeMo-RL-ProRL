@@ -8,12 +8,19 @@ export HF_HOME=
 export HF_DATASETS_CACHE=
 export NEMORL_DIR=
 export OPENHANDS_DIR=
+# tmp for sandbox
+export VERL_DIR=
 
 PROJECT_NAME=prorl-yukih
-EXP_NAME=nemorl-proagent-qwen3-4b
+EXP_NAME=nemorl-prorl2-math-qwen3-4b
 
 NUM_ACTOR_NODES=2
 NUM_ACTOR_GPUS=8
+
+OPENHANDS_SERVER_INIT_WORKERS=512
+OPENHANDS_SERVER_RUN_WORKERS=512
+OPENHANDS_NUM_WORKERS=512
+OPENHANDS_TIMEOUT=300
 
 # run command
 RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
@@ -22,7 +29,7 @@ NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
     grpo.num_prompts_per_step=4 \
     grpo.num_generations_per_prompt=4 \
-    grpo.max_rollout_turns=30 \
+    grpo.max_rollout_turns=2 \
     loss_fn.reference_policy_kl_penalty=0.001 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
     policy.max_total_sequence_length=32768 \
@@ -30,12 +37,14 @@ uv run python examples/run_grpo_openhands.py \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
     policy.dtensor_cfg.activation_checkpointing=true \
+    ++policy.generation.openhands_num_workers=${OPENHANDS_NUM_WORKERS} \
+    ++policy.generation.is_reasoning_task=true \
     policy.generation.vllm_cfg.async_engine=true \
     ++policy.generation.vllm_cfg.expose_http_server=true \
     policy.dynamic_batching.enabled=false \
     policy.sequence_packing.enabled=false \
-    ++data.train_data_path=/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/haozh/data/SkyRL-v0-80-data/train.parquet \
-    ++data.val_data_path=/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/haozh/data/SkyRL-v0-80-data/validation.parquet \
+    ++data.train_data_path=/lustre/fsw/portfolios/nvr/users/mingjiel/data/deepscaler/train_filtered.parquet \
+    ++data.val_data_path=/lustre/fsw/portfolios/nvr/users/mingjiel/data/deepscaler/amc.parquet \
     ++data.use_raw_data=true \
     ++env.do_rollout_in_env=true \
     checkpointing.enabled=false \
@@ -52,6 +61,9 @@ COMMAND=${RUN_COMMAND} \
 CONTAINER=/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
 OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fs1/portfolios/llmservice/users/shaokunz/Openhands2/OpenHands_internal/singularity_images_v2 \
 OPENHANDS_DIR=${OPENHANDS_DIR} \
+OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
+OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
+OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
 MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
 sbatch \
     --account=nvr_lpr_agentic \
