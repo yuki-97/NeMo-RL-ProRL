@@ -752,7 +752,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         # TODO: not used for now, need check later
         temperature = request["temperature"]
         top_p = request["top_p"]
-        seed = request["seed"]
+        # seed = request["seed"]
 
         # Convert to BatchedDataDict for generation
         data = BatchedDataDict(
