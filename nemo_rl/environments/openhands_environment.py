@@ -524,30 +524,46 @@ class OpenhandsEnvironment:
             for trajectory in results[instance_id].values():
                 messages = trajectory.get("messages", [])
                 for message in messages:
+                    # convert to tensors
                     message["token_ids"] = torch.tensor(
                         message["token_ids"], dtype=torch.int64
                     )
+                    # convert to tensors and rename to generation_logprobs
+                    if "logprobs" in message:
+                        if message["logprobs"] is not None:
+                            message["generation_logprobs"] = torch.tensor(
+                                message["logprobs"], dtype=torch.float32
+                            )
+                        message.pop("logprobs")
+                    # remove input_ids to avoid duplicate in training
+                    if message["input_ids"] is not None:
+                        input_length = len(message["input_ids"])
+                        message["token_ids"] = message["token_ids"][input_length:]
+                        message["generation_logprobs"] = message["generation_logprobs"][
+                            input_length:
+                        ]
 
-                success = trajectory.get("success", False)
+                resolved = trajectory.get("resolved", False)
+                prompt_ids = get_prompt_ids(messages)
 
                 # append to result_dict
                 result_dict["message_log"].append(messages)
-                result_dict["prompt_ids"].append(get_prompt_ids(messages))
+                result_dict["prompt_ids"].append(prompt_ids)
                 # prompt length
-                result_dict["length"].append(len(result_dict["prompt_ids"]))
+                result_dict["length"].append(len(prompt_ids))
                 result_dict["extra_env_info"].append(
                     {
-                        "success": success,
+                        "success": trajectory.get("success", False),
                         "error": trajectory.get("error", None),
                         # "instance": instance,
-                        "resolved": trajectory.get("resolved", False),
+                        "resolved": resolved,
                         "finish": trajectory.get("finish", False),
                         "is_padded": trajectory.get("is_padded", False),
                     }
                 )
                 result_dict["task_name"].append("openhands")
                 # TODO
-                result_dict["total_reward"].append(int(success))
+                result_dict["total_reward"].append(float(resolved))
                 # result_dict["idx"].append(trajectory["idx"])
                 result_dict["truncated"].append(trajectory.get("end_properly", False))
                 # TODO: check
