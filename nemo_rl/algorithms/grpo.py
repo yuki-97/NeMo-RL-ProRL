@@ -220,7 +220,7 @@ def setup(
             val_dataset,
             batch_size=grpo_config["val_batch_size"],
             shuffle=False,
-            collate_fn=rl_collate_fn,
+            collate_fn=raw_data_collate_fn if use_raw_data else rl_collate_fn,
         )
         print(
             f"  ✓ Validation dataloader loaded with {len(val_dataset)} samples",
