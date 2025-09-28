@@ -12,7 +12,7 @@ export OPENHANDS_DIR=
 export VERL_DIR=
 
 PROJECT_NAME=prorl-yukih
-EXP_NAME=nemorl-prorl2-math-qwen3-4b
+EXP_NAME=nemorl-prorl-math-qwen3-4b
 
 NUM_ACTOR_NODES=2
 NUM_ACTOR_GPUS=8
@@ -27,21 +27,21 @@ RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=$
 UV_PROJECT_ENVIRONMENT=${NEMORL_DIR}/.venv NEMO_RL_VENV_DIR=${NEMORL_DIR}/venvs \
 NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
-    grpo.num_prompts_per_step=4 \
-    grpo.num_generations_per_prompt=4 \
-    grpo.max_rollout_turns=2 \
+    grpo.num_prompts_per_step=512 \
+    grpo.num_generations_per_prompt=16 \
+    grpo.max_rollout_turns=30 \
     loss_fn.reference_policy_kl_penalty=0.001 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
     policy.max_total_sequence_length=8192 \
-    policy.train_global_batch_size=16 \
+    policy.train_global_batch_size=1024 \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
     policy.dtensor_cfg.activation_checkpointing=true \
     policy.dtensor_cfg.cpu_offload=true \
     ++policy.generation.openhands_num_workers=${OPENHANDS_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
-    ++policy.generation.max_prompt_length=6656 \
-    ++policy.generation.max_response_length=1536 \
+    ++policy.generation.max_prompt_length=2048 \
+    ++policy.generation.max_response_length=6144 \
     policy.generation.vllm_cfg.async_engine=true \
     ++policy.generation.vllm_cfg.expose_http_server=true \
     policy.dynamic_batching.enabled=false \
