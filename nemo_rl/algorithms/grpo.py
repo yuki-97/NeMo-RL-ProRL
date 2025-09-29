@@ -634,6 +634,22 @@ def grpo_train(
     val_period = master_config["grpo"]["val_period"]
     colocated_inference = master_config["policy"]["generation"]["colocated"]["enabled"]
 
+    # estimator
+    estimator_config = master_config["grpo"]["estimator"]
+    loss_config = master_config["loss_fn"]
+    if estimator_config["name"] == "grpo":
+        from nemo_rl.algorithms.advantage_estimator import GRPOAdvantageEstimator
+
+        estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
+    elif estimator_config["name"] == "reinforce_plus_plus":
+        from nemo_rl.algorithms.advantage_estimator import (
+            ReinforcePlusPlusAdvantageEstimator,
+        )
+
+        estimator = ReinforcePlusPlusAdvantageEstimator(estimator_config, loss_config)
+    else:
+        raise ValueError(f"Invalid estimator name: {estimator_config['name']}")
+
     # Run validation at the start if configured
     if val_at_start and current_step == 0:
         print("\n🔍 Running initial validation...", flush=True)
@@ -687,7 +703,7 @@ def grpo_train(
                                 pad_value_dict={"token_ids": tokenizer.pad_token_id},
                             )
                         )
-                        input_ids = batched_flat["token_ids"]
+                        prompt_ids = batched_flat["token_ids"]
                 else:
                     repeated_batch = batch
 
@@ -746,32 +762,8 @@ def grpo_train(
                             greedy=False,
                         )
                     if master_config["data"].get("use_raw_data", False):
-                        input_ids = repeated_batch["prompt_ids"]
+                        prompt_ids = repeated_batch["prompt_ids"]
                     policy_generation.finish_generation()
-
-                # Calculate rewards & advantages
-                print("▶ Processing rewards...,", flush=True)
-                with timer.time("reward_calculation"):
-                    # Extract rewards from final_batch
-                    rewards = repeated_batch["total_reward"]
-
-                    print("▶ Computing advantages...", flush=True)
-                    baseline, std = calculate_baseline_and_std_per_prompt(
-                        input_ids,
-                        rewards,
-                        torch.ones_like(rewards),
-                        leave_one_out_baseline=master_config["grpo"][
-                            "use_leave_one_out_baseline"
-                        ],
-                    )
-                    advantages = (rewards - baseline).unsqueeze(-1)
-
-                    if master_config["grpo"]["normalize_rewards"]:
-                        # don't sharpen the ones with no variation
-                        zero_std_mask = std > 0
-                        advantages[zero_std_mask] = (
-                            advantages[zero_std_mask] / std.unsqueeze(-1)[zero_std_mask]
-                        )
 
                 with timer.time("data_processing"):
                     use_overlong_filtering = master_config["grpo"]["overlong_filtering"]
@@ -799,9 +791,6 @@ def grpo_train(
                                 message["generation_logprobs"] = torch.zeros_like(
                                     message["token_ids"], dtype=torch.float32
                                 )
-                            message["advantages"] = advantages[i].expand(
-                                message["token_ids"].shape
-                            )
 
                     # Convert updated LLMMessageLogType to FlatMessagesType for training
                     flat_messages, input_lengths = batched_message_log_to_flat_message(
@@ -817,7 +806,6 @@ def grpo_train(
                         {
                             "input_ids": flat_messages["token_ids"],
                             "input_lengths": input_lengths,
-                            "advantages": flat_messages["advantages"],
                             "generation_logprobs": flat_messages["generation_logprobs"],
                             "token_mask": flat_messages["token_loss_mask"],
                             "sample_mask": repeated_batch["loss_multiplier"],
@@ -841,6 +829,27 @@ def grpo_train(
                     )["reference_logprobs"]
                     train_data["prev_logprobs"] = fprop_logprobs
                     train_data["reference_policy_logprobs"] = reference_logprobs
+
+                # Calculate rewards & advantages
+                with timer.time("reward_calculation"):
+                    print("▶ Processing rewards...,", flush=True)
+
+                    # Extract rewards from final_batch
+                    rewards = repeated_batch["total_reward"]
+
+                    # Get masks from train_data
+                    token_mask = train_data["token_mask"]
+                    sample_mask = train_data["sample_mask"]
+                    mask = token_mask * sample_mask.unsqueeze(-1)
+
+                    print("▶ Computing advantages...", flush=True)
+                    train_data["advantages"] = estimator.compute_advantage(
+                        prompt_ids,
+                        rewards,
+                        mask,
+                        logprobs_policy=train_data["prev_logprobs"],
+                        logprobs_reference=train_data["reference_policy_logprobs"],
+                    )
 
                 print("▶ Preparing for training...", flush=True)
                 with timer.time("training_prep"):

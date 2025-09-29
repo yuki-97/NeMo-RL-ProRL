@@ -22,14 +22,22 @@ OPENHANDS_SERVER_RUN_WORKERS=512
 OPENHANDS_NUM_WORKERS=512
 OPENHANDS_TIMEOUT=300
 
+# rf++
+# grpo.estimator.name=reinforce_plus_plus \
+# grpo.estimator.minus_baseline=true \
+# loss_fn.use_kl_in_reward=false \
+
 # run command
 RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
 UV_PROJECT_ENVIRONMENT=${NEMORL_DIR}/.venv NEMO_RL_VENV_DIR=${NEMORL_DIR}/venvs \
 NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
+    grpo.estimator.name=reinforce_plus_plus \
+    grpo.estimator.minus_baseline=true \
     grpo.num_prompts_per_step=512 \
     grpo.num_generations_per_prompt=16 \
     grpo.max_rollout_turns=30 \
+    loss_fn.use_kl_in_reward=false \
     loss_fn.reference_policy_kl_penalty=0.001 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
     policy.max_total_sequence_length=8192 \
