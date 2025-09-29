@@ -535,13 +535,6 @@ class OpenhandsEnvironment:
                                 message["logprobs"], dtype=torch.float32
                             )
                         message.pop("logprobs")
-                    # remove input_ids to avoid duplicate in training
-                    if message["input_ids"] is not None:
-                        input_length = len(message["input_ids"])
-                        message["token_ids"] = message["token_ids"][input_length:]
-                        message["generation_logprobs"] = message["generation_logprobs"][
-                            input_length:
-                        ]
 
                 resolved = trajectory.get("resolved", False)
                 prompt_ids = get_prompt_ids(messages)
@@ -565,7 +558,9 @@ class OpenhandsEnvironment:
                 # TODO
                 result_dict["total_reward"].append(float(resolved))
                 # result_dict["idx"].append(trajectory["idx"])
-                result_dict["truncated"].append(trajectory.get("end_properly", False))
+                result_dict["truncated"].append(
+                    not trajectory.get("end_properly", False)
+                )
                 # TODO: check
                 result_dict["loss_multiplier"].append(1.0)
 

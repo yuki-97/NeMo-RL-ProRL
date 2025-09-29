@@ -755,10 +755,11 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         # seed = request["seed"]
 
         # Convert to BatchedDataDict for generation
+        input_lengths = len(input_ids)
         data = BatchedDataDict(
             {
                 "input_ids": torch.tensor([input_ids]),
-                "input_lengths": torch.tensor([len(input_ids)]),
+                "input_lengths": torch.tensor([input_lengths]),
             }
         )
 
@@ -768,9 +769,11 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             pass
 
         # Convert result to dict
+        output_ids = result["output_ids"][0][input_lengths:]
+        logprobs = result["logprobs"][0][input_lengths:]
         result = {
-            "response_ids": result["output_ids"][0].tolist(),
-            "logprobs": result["logprobs"][0].tolist(),
+            "response_ids": output_ids.tolist(),
+            "logprobs": logprobs.tolist(),
         }
         return result
 
