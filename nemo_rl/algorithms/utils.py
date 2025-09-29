@@ -44,6 +44,12 @@ def calculate_kl_penalty_joschu2020(
     return torch.exp(r) - r - 1
 
 
+def calculate_kl_penalty_k1(
+    logprobs_policy: torch.Tensor, logprobs_reference: torch.Tensor
+) -> torch.Tensor:
+    return logprobs_policy - logprobs_reference
+
+
 def calculate_baseline_and_std_per_prompt(
     prompts: torch.Tensor,
     rewards: torch.Tensor,

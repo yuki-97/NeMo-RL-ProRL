@@ -30,6 +30,7 @@ Tensor = TypeVar("Tensor", bound=torch.Tensor)
 
 
 class ClippedPGLossConfig(TypedDict):
+    use_kl_in_reward: bool
     reference_policy_kl_penalty: float
     ratio_clip_min: float
     ratio_clip_max: float
@@ -98,6 +99,7 @@ class ClippedPGLossFn(LossFunction):
     """
 
     def __init__(self, cfg: ClippedPGLossConfig):
+        self.use_kl_in_reward = cfg["use_kl_in_reward"]
         self.ratio_clip_min = cfg["ratio_clip_min"]
         self.ratio_clip_max = cfg["ratio_clip_max"]
         self.ratio_clip_c = cfg["ratio_clip_c"]  # set to None to disable dual-clipping
@@ -187,7 +189,7 @@ class ClippedPGLossFn(LossFunction):
         curr_logprobs = torch.where(mask.to(torch.bool), curr_logprobs, 0.0)
 
         # Calculate KL regularization.
-        if self.reference_policy_kl_penalty != 0:
+        if not self.use_kl_in_reward and self.reference_policy_kl_penalty != 0:
             if self.use_on_policy_kl_approximation:
                 # See: docs/guides/grpo.md#on-policy-kl-approximation
                 kl_importance_weights = torch.exp(

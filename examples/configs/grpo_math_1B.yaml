@@ -5,16 +5,22 @@ grpo:
   max_rollout_turns: 1 # for multi-turn rollouts. Math Environments just have 1 turn (answering the question)
   max_num_epochs: 1
   max_num_steps: 1000000
-  normalize_rewards: true
-  use_leave_one_out_baseline: true
   val_period: 10
   val_at_start: false
   overlong_filtering: false
   max_val_samples: 256
   val_batch_size: 256
   seed: 42
+  estimator:
+    name: "grpo" # grpo, reinforce_plus_plus
+    # grpo
+    normalize_rewards: true
+    use_leave_one_out_baseline: true
+    # reinforce_plus_plus
+    minus_baseline: null
 
 loss_fn:
+  use_kl_in_reward: false
   reference_policy_kl_penalty: 0.01
   ratio_clip_min: 0.2
   ratio_clip_max: 0.2
