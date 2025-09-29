@@ -190,6 +190,9 @@ class ClippedPGLossFn(LossFunction):
                 dim=-1, index=next_tokens.unsqueeze(-1)
             ).squeeze(-1)
 
+        # Set padding tokens logprobs to 0 to avoid nan when calculating KL
+        curr_logprobs = torch.where(mask.to(torch.bool), curr_logprobs, 0.0)
+
         # Calculate KL regularization.
         if self.reference_policy_kl_penalty != 0:
             if self.use_on_policy_kl_approximation:
