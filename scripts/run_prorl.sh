@@ -39,6 +39,8 @@ uv run python examples/run_grpo_openhands.py \
     grpo.max_rollout_turns=30 \
     loss_fn.use_kl_in_reward=true \
     loss_fn.reference_policy_kl_penalty=0.001 \
+    loss_fn.use_importance_sampling_correction=true \
+    loss_fn.truncated_importance_sampling_ratio=2 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
     policy.max_total_sequence_length=8192 \
     policy.train_global_batch_size=1024 \

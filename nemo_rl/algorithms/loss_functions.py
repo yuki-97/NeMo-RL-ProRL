@@ -37,6 +37,7 @@ class ClippedPGLossConfig(TypedDict):
     ratio_clip_c: float
     use_on_policy_kl_approximation: bool
     use_importance_sampling_correction: bool
+    truncated_importance_sampling_ratio: NotRequired[float]
     token_level_loss: bool
     # If True, apply the off-policy importance-sampling correction at the
     # sequence level (one weight per generated sample), as in GSPO.
@@ -109,6 +110,9 @@ class ClippedPGLossFn(LossFunction):
         self.use_importance_sampling_correction = cfg[
             "use_importance_sampling_correction"
         ]
+        self.truncated_importance_sampling_ratio = cfg[
+            "truncated_importance_sampling_ratio"
+        ]
         # Whether to compute importance weights per-sequence instead of per-token.
         self.sequence_level_importance_ratios = cfg.get(
             "sequence_level_importance_ratios",
@@ -120,6 +124,13 @@ class ClippedPGLossFn(LossFunction):
         if self.sequence_level_importance_ratios:
             assert self.loss_type == LossType.SEQUENCE_LEVEL, (
                 "sequence-level importance sampling (e.g. GSPO) is mutually exclusive with token-level loss"
+            )
+        if self.truncated_importance_sampling_ratio is not None:
+            assert self.use_importance_sampling_correction, (
+                "truncated_importance_sampling_ratio is only supported when use_importance_sampling_correction is True"
+            )
+            assert self.truncated_importance_sampling_ratio > 0, (
+                "truncated_importance_sampling_ratio should be positive"
             )
 
     def __call__(
@@ -268,6 +279,11 @@ class ClippedPGLossFn(LossFunction):
             actor_importance_weights = torch.nan_to_num(
                 actor_importance_weights, nan=0.0, posinf=0.0, neginf=0.0
             )
+            if self.truncated_importance_sampling_ratio is not None:
+                actor_importance_weights = torch.clamp(
+                    actor_importance_weights,
+                    max=self.truncated_importance_sampling_ratio,
+                )
             # Broadcast to token dimension so we can reuse existing reduction
             actor_importance_weights_expanded = actor_importance_weights.unsqueeze(-1)
         else:
@@ -278,6 +294,11 @@ class ClippedPGLossFn(LossFunction):
             actor_importance_weights_expanded = torch.nan_to_num(
                 actor_importance_weights_expanded, nan=0.0, posinf=0.0, neginf=0.0
             )
+            if self.truncated_importance_sampling_ratio is not None:
+                actor_importance_weights_expanded = torch.clamp(
+                    actor_importance_weights_expanded,
+                    max=self.truncated_importance_sampling_ratio,
+                )
         actor_importance_weights = actor_importance_weights_expanded
         del actor_importance_weights_expanded
         if self.use_importance_sampling_correction:
