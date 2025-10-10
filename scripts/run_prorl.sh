@@ -41,6 +41,7 @@ uv run python examples/run_grpo_openhands.py \
     grpo.max_val_samples=1000000 \
     loss_fn.use_kl_in_reward=false \
     loss_fn.reference_policy_kl_penalty=0.001 \
+    loss_fn.reference_policy_kl_type=k2 \
     loss_fn.use_importance_sampling_correction=true \
     loss_fn.truncated_importance_sampling_ratio=2 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
