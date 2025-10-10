@@ -25,7 +25,7 @@ OPENHANDS_TIMEOUT=300
 # rf++
 # grpo.estimator.name=reinforce_plus_plus \
 # grpo.estimator.minus_baseline=true \
-# loss_fn.use_kl_in_reward=true \
+# loss_fn.use_kl_in_reward=false \
 
 # run command
 RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
@@ -39,7 +39,7 @@ uv run python examples/run_grpo_openhands.py \
     grpo.max_rollout_turns=30 \
     grpo.val_at_start=true \
     grpo.max_val_samples=1000000 \
-    loss_fn.use_kl_in_reward=true \
+    loss_fn.use_kl_in_reward=false \
     loss_fn.reference_policy_kl_penalty=0.001 \
     loss_fn.use_importance_sampling_correction=true \
     loss_fn.truncated_importance_sampling_ratio=2 \
