@@ -129,6 +129,9 @@ class ClippedPGLossFn(LossFunction):
             assert self.use_importance_sampling_correction, (
                 "truncated_importance_sampling_ratio is only supported when use_importance_sampling_correction is True"
             )
+            assert not self.sequence_level_importance_ratios, (
+                "truncated_importance_sampling_ratio is only supported for token-level importance sampling"
+            )
             assert self.truncated_importance_sampling_ratio > 0, (
                 "truncated_importance_sampling_ratio should be positive"
             )
@@ -279,11 +282,6 @@ class ClippedPGLossFn(LossFunction):
             actor_importance_weights = torch.nan_to_num(
                 actor_importance_weights, nan=0.0, posinf=0.0, neginf=0.0
             )
-            if self.truncated_importance_sampling_ratio is not None:
-                actor_importance_weights = torch.clamp(
-                    actor_importance_weights,
-                    max=self.truncated_importance_sampling_ratio,
-                )
             # Broadcast to token dimension so we can reuse existing reduction
             actor_importance_weights_expanded = actor_importance_weights.unsqueeze(-1)
         else:
