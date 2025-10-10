@@ -16,7 +16,7 @@ import torch
 
 from nemo_rl.algorithms.utils import (
     calculate_baseline_and_std_per_prompt,
-    calculate_kl_penalty_k1,
+    calculate_kl_penalty,
 )
 
 
@@ -50,6 +50,7 @@ class ReinforcePlusPlusAdvantageEstimator:
         self.minus_baseline = estimator_config["minus_baseline"]
         self.use_kl_in_reward = loss_config["use_kl_in_reward"]
         self.kl_coef = loss_config["reference_policy_kl_penalty"]
+        self.kl_type = loss_config["reference_policy_kl_type"]
 
     def compute_advantage(
         self, prompt_ids, rewards, mask, logprobs_policy, logprobs_reference, **kwargs
@@ -71,7 +72,11 @@ class ReinforcePlusPlusAdvantageEstimator:
 
         # add kl penalty
         if self.use_kl_in_reward:
-            kl = calculate_kl_penalty_k1(logprobs_policy, logprobs_reference)
+            kl = calculate_kl_penalty(
+                logprobs_policy,
+                logprobs_reference,
+                kl_type=self.kl_type,
+            )
             adv = adv - self.kl_coef * kl
 
         # normalization

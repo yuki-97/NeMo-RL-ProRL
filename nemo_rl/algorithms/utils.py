@@ -30,24 +30,33 @@ from nemo_rl.data import hf_datasets
 from nemo_rl.models.policy import TokenizerConfig
 
 
-def calculate_kl_penalty_joschu2020(
-    logprobs_policy: torch.Tensor, logprobs_reference: torch.Tensor
+def calculate_kl_penalty(
+    logprobs_policy: torch.Tensor,
+    logprobs_reference: torch.Tensor,
+    kl_type: str = "k3",
 ) -> torch.Tensor:
     """Calculates a per-token estimate of the KL Divergence between two log_probs.
 
-    From Schulman 2020, always positive.
+    From Schulman 2020, http://joschu.net/blog/kl-approx.html.
 
     logprobs_policy:    torch.Tensor (b, s)
     logprobs_reference: torch.Tensor (b, s)
     """
-    r = logprobs_reference - logprobs_policy
-    return torch.exp(r) - r - 1
+    logr = logprobs_reference - logprobs_policy
 
+    if kl_type == "k1":
+        kl = -logr
 
-def calculate_kl_penalty_k1(
-    logprobs_policy: torch.Tensor, logprobs_reference: torch.Tensor
-) -> torch.Tensor:
-    return logprobs_policy - logprobs_reference
+    elif kl_type == "k2":
+        kl = logr**2 / 2
+
+    elif kl_type == "k3":
+        kl = torch.exp(logr) - 1 - logr
+
+    else:
+        raise ValueError(f"Invalid KL type: {kl_type}")
+
+    return kl
 
 
 def calculate_baseline_and_std_per_prompt(

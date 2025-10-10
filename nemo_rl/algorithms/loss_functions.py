@@ -16,10 +16,7 @@ from typing import Any, NotRequired, Optional, TypedDict, TypeVar
 import torch
 
 from nemo_rl.algorithms.interfaces import LossFunction, LossType
-from nemo_rl.algorithms.utils import (
-    calculate_kl_penalty_joschu2020,
-    masked_mean,
-)
+from nemo_rl.algorithms.utils import calculate_kl_penalty, masked_mean
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.model_utils import (
     from_parallel_logits_to_logprobs,
@@ -32,6 +29,7 @@ Tensor = TypeVar("Tensor", bound=torch.Tensor)
 class ClippedPGLossConfig(TypedDict):
     use_kl_in_reward: bool
     reference_policy_kl_penalty: float
+    reference_policy_kl_type: str
     ratio_clip_min: float
     ratio_clip_max: float
     ratio_clip_c: float
@@ -105,6 +103,7 @@ class ClippedPGLossFn(LossFunction):
         self.ratio_clip_max = cfg["ratio_clip_max"]
         self.ratio_clip_c = cfg["ratio_clip_c"]  # set to None to disable dual-clipping
         self.reference_policy_kl_penalty = cfg["reference_policy_kl_penalty"]
+        self.reference_policy_kl_type = cfg["reference_policy_kl_type"]
         self.disable_ppo_ratio = cfg.get("disable_ppo_ratio", False)
         self.use_on_policy_kl_approximation = cfg["use_on_policy_kl_approximation"]
         self.use_importance_sampling_correction = cfg[
@@ -217,9 +216,10 @@ class ClippedPGLossFn(LossFunction):
             kl = (
                 kl_importance_weights
                 * self.reference_policy_kl_penalty
-                * calculate_kl_penalty_joschu2020(
+                * calculate_kl_penalty(
                     logprobs_policy=curr_logprobs,
                     logprobs_reference=reference_policy_logprobs,
+                    kl_type=self.reference_policy_kl_type,
                 )
             )
             if self.loss_type == LossType.TOKEN_LEVEL:
