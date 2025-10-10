@@ -12,7 +12,7 @@ export OPENHANDS_DIR=
 export VERL_DIR=
 
 PROJECT_NAME=prorl-yukih
-EXP_NAME=nemorl-prorl-math-qwen3-4b
+EXP_NAME=nemorl-promath-512-64-8k-$(date +%m%d)
 
 NUM_ACTOR_NODES=2
 NUM_ACTOR_GPUS=8
@@ -34,16 +34,18 @@ NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
     grpo.estimator.name=reinforce_plus_plus \
     grpo.estimator.minus_baseline=true \
-    grpo.num_prompts_per_step=512 \
+    grpo.num_prompts_per_step=32 \
     grpo.num_generations_per_prompt=16 \
     grpo.max_rollout_turns=30 \
+    grpo.val_at_start=true \
+    grpo.max_val_samples=1000000 \
     loss_fn.use_kl_in_reward=false \
     loss_fn.reference_policy_kl_penalty=0.001 \
     loss_fn.use_importance_sampling_correction=true \
     loss_fn.truncated_importance_sampling_ratio=2 \
     policy.model_name=Qwen/Qwen3-4B-Instruct-2507 \
     policy.max_total_sequence_length=8192 \
-    policy.train_global_batch_size=1024 \
+    policy.train_global_batch_size=64 \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
     policy.dtensor_cfg.activation_checkpointing=true \
@@ -54,11 +56,13 @@ uv run python examples/run_grpo_openhands.py \
     ++policy.generation.max_response_length=6144 \
     policy.generation.vllm_cfg.async_engine=true \
     ++policy.generation.vllm_cfg.expose_http_server=http \
-    policy.dynamic_batching.enabled=false \
+    policy.dynamic_batching.enabled=true \
     policy.sequence_packing.enabled=false \
+    policy.optimizer.kwargs.lr=1e-6 \
     ++data.train_data_path=/lustre/fsw/portfolios/nvr/users/mingjiel/data/deepscaler/train_filtered.parquet \
     ++data.val_data_path=/lustre/fsw/portfolios/nvr/users/mingjiel/data/deepscaler/amc.parquet \
     ++data.use_raw_data=true \
+    data.shuffle=false \
     ++env.do_rollout_in_env=true \
     checkpointing.enabled=false \
     logger.wandb_enabled=true \
@@ -81,7 +85,7 @@ MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
 sbatch \
     --account=nvr_lpr_agentic \
     --job-name=${EXP_NAME} \
-    --partition=interactive \
+    --partition=batch_block1 \
     --time=4:0:0 \
     --nodes=${NUM_ACTOR_NODES} \
     --gres=gpu:${NUM_ACTOR_GPUS} \
