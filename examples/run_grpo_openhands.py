@@ -17,7 +17,7 @@ import os
 import pprint
 from typing import Optional
 
-from datasets import Dataset, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import OmegaConf
 from transformers import PreTrainedTokenizerBase
 
@@ -78,16 +78,25 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 
 
 def setup_data(data_config: DataConfig) -> tuple[Dataset, Optional[Dataset]]:
-    dataset = load_dataset("parquet", data_files=data_config["train_data_path"])
-    dataset = dataset["train"]
-    if "instance" not in dataset.column_names:
-        dataset = dataset.map(format_instance)
+    def load_multiple_datasets(data_paths: list[str] | str) -> Dataset:
+        if isinstance(data_paths, str):
+            data_paths = [data_paths]
 
+        datasets = []
+        for path in data_paths:
+            dataset = load_dataset("parquet", data_files=path)["train"]
+            if "instance" not in dataset.column_names:
+                dataset = dataset.map(format_instance)
+            datasets.append(dataset)
+
+        return concatenate_datasets(datasets)
+
+    # train
+    dataset = load_multiple_datasets(data_config["train_data_path"])
+
+    # val
     if "val_data_path" in data_config:
-        val_dataset = load_dataset("parquet", data_files=data_config["val_data_path"])
-        val_dataset = val_dataset["train"]
-        if "instance" not in val_dataset.column_names:
-            val_dataset = val_dataset.map(format_instance)
+        val_dataset = load_multiple_datasets(data_config["val_data_path"])
     else:
         val_dataset = None
 
