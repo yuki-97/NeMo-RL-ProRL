@@ -17,6 +17,9 @@ grpo:
     max_trajectory_age_steps: 1
   estimator:
     name: "grpo" # grpo, reinforce_plus_plus
+    # advantage boost
+    advantage_boost_value: 0
+    advantage_boost_threshold: 1.0
     # grpo
     normalize_rewards: true
     use_leave_one_out_baseline: true

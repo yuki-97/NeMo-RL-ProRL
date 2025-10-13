@@ -26,6 +26,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoProcessor
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+from nemo_rl.algorithms.advantage_estimator import boost_high_score_advantages
 from nemo_rl.algorithms.interfaces import LossFunction
 from nemo_rl.algorithms.loss_functions import (
     ClippedPGLossConfig,
@@ -636,6 +637,8 @@ def grpo_train(
 
     # estimator
     estimator_config = master_config["grpo"]["estimator"]
+    advantage_boost_value = estimator_config["advantage_boost_value"]
+    advantage_boost_threshold = estimator_config["advantage_boost_threshold"]
     loss_config = master_config["loss_fn"]
     if estimator_config["name"] == "grpo":
         from nemo_rl.algorithms.advantage_estimator import GRPOAdvantageEstimator
@@ -850,6 +853,14 @@ def grpo_train(
                         logprobs_policy=train_data["prev_logprobs"],
                         logprobs_reference=train_data["reference_policy_logprobs"],
                     )
+                    # Apply advantage boost
+                    if advantage_boost_value > 0:
+                        train_data["advantages"] = boost_high_score_advantages(
+                            train_data["advantages"],
+                            rewards,
+                            advantage_boost_value,
+                            advantage_boost_threshold,
+                        )
 
                 print("▶ Preparing for training...", flush=True)
                 with timer.time("training_prep"):
