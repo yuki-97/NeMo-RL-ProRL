@@ -208,11 +208,11 @@ for i in "${!nodes_array[@]}"; do
         --no-container-mount-home --container-image=$CODE_SANDBOX_IMAGE --container-mounts=$CODE_SANDBOX_MOUNTS \
         -o "$LOG_DIR/sandbox-code-%j-worker-node-$i.out" -e "$LOG_DIR/sandbox-code-%j-worker-node-$i.err" \
         bash -c "cd /workspace && export PYTHONPATH=/verl && python /verl/verl/nvidia/remote_reward_server/launch_default_reward_server.py" &
-    # # start reasoning sandbox with 2 cpus
-    # srun --overlap --nodes=1 --cpus-per-task=2 --mem=524288M --ntasks=1 -w $node \
-    #     -o "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.out" -e "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.err" \
-    #     --no-container-mount-home --container-image=${GYM_SANDBOX_IMAGE} \
-    #     bash -c "python scripts/host_reward_server.py" &
+    # start reasoning sandbox with 2 cpus
+    srun --overlap --nodes=1 --cpus-per-task=2 --mem=524288M --ntasks=1 -w $node \
+        --no-container-mount-home --container-image=${GYM_SANDBOX_IMAGE} \
+        -o "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.out" -e "$LOG_DIR/sandbox_reasoning-%j-head-node-$i.err" \
+        bash -c "python scripts/host_reward_server.py" &
 done
 sleep 10s
 
