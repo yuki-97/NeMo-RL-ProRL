@@ -28,7 +28,7 @@ OPENHANDS_TIMEOUT=300
 # loss_fn.use_kl_in_reward=false \
 
 # run command
-RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
+UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
 UV_PROJECT_ENVIRONMENT=${NEMORL_DIR}/.venv NEMO_RL_VENV_DIR=${NEMORL_DIR}/venvs \
 NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
@@ -72,25 +72,25 @@ uv run python examples/run_grpo_openhands.py \
     logger.wandb.project=${PROJECT_NAME} \
     logger.wandb.name=${EXP_NAME} \
     cluster.num_nodes=${NUM_ACTOR_NODES} \
-    cluster.gpus_per_node=${NUM_ACTOR_GPUS}"
+    cluster.gpus_per_node=${NUM_ACTOR_GPUS}
 
 # launch job
 # COMMAND=${RUN_COMMAND} \
-CONTAINER=/lustre/fsw/portfolios/llmservice/users/haozh/dockers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
-OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fsw/portfolios/llmservice/users/haozh/singularity_images \
-OPENHANDS_DIR=${OPENHANDS_DIR} \
-OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
-OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
-OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
-MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
-sbatch \
-    --account=llmservice_fm_vision \
-    --job-name=${EXP_NAME} \
-    --partition=interactive \
-    --time=4:0:0 \
-    --nodes=${NUM_ACTOR_NODES} \
-    --gres=gpu:${NUM_ACTOR_GPUS} \
-    ray.sub | tee /dev/stderr | grep -o '[0-9]\+' > latest_job_id.txt
+# CONTAINER=/lustre/fsw/portfolios/llmservice/users/haozh/dockers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
+# OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fsw/portfolios/llmservice/users/haozh/singularity_images \
+# OPENHANDS_DIR=${OPENHANDS_DIR} \
+# OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
+# OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
+# OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
+# MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
+# sbatch \
+#     --account=llmservice_fm_vision \
+#     --job-name=${EXP_NAME} \
+#     --partition=interactive \
+#     --time=4:0:0 \
+#     --nodes=${NUM_ACTOR_NODES} \
+#     --gres=gpu:${NUM_ACTOR_GPUS} \
+#     ray.sub | tee /dev/stderr | grep -o '[0-9]\+' > latest_job_id.txt
 
-JOB_ID=$(cat latest_job_id.txt)
-echo "Job submitted with ID: $JOB_ID"
+# JOB_ID=$(cat latest_job_id.txt)
+# echo "Job submitted with ID: $JOB_ID"
