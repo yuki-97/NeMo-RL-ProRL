@@ -33,6 +33,7 @@ from nemo_rl.algorithms.loss_functions import (
     ClippedPGLossDataDict,
     ClippedPGLossFn,
 )
+from nemo_rl.algorithms.reward_shaping import RewardShapingManager
 from nemo_rl.algorithms.utils import (
     calculate_baseline_and_std_per_prompt,
     print_performance_metrics,
@@ -635,6 +636,10 @@ def grpo_train(
     val_period = master_config["grpo"]["val_period"]
     colocated_inference = master_config["policy"]["generation"]["colocated"]["enabled"]
 
+    # reward shaping
+    reward_config_list = master_config["grpo"]["reward"]
+    reward_shaping = RewardShapingManager(reward_config_list)
+
     # estimator
     estimator_config = master_config["grpo"]["estimator"]
     advantage_boost_value = estimator_config["advantage_boost_value"]
@@ -837,8 +842,16 @@ def grpo_train(
                 with timer.time("reward_calculation"):
                     print("▶ Processing rewards...,", flush=True)
 
-                    # Extract rewards from final_batch
+                    # Apply reward shaping
+                    reward_shaping_kwargs = {
+                        "token_ids": train_data["input_ids"],
+                        "prompt_ids": repeated_batch["prompt_ids_left_padded"],
+                        "response_ids": repeated_batch["response_ids"],
+                        "token_mask": train_data["token_mask"],
+                        "truncated": repeated_batch["truncated"],
+                    }
                     rewards = repeated_batch["total_reward"]
+                    rewards = reward_shaping(rewards, **reward_shaping_kwargs)
 
                     # Get masks from train_data
                     token_mask = train_data["token_mask"]

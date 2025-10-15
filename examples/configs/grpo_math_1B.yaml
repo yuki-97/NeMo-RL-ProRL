@@ -25,6 +25,13 @@ grpo:
     use_leave_one_out_baseline: true
     # reinforce_plus_plus
     minus_baseline: null
+  reward:
+    - name: "stop_properly_penalty"
+      penalty_coef: 0
+    - name: "length_penalty"
+      penalty_type: "cosine"
+      penalty_coef: 0
+      max_length: ${policy.max_total_sequence_length}
 
 loss_fn:
   use_kl_in_reward: false

@@ -502,13 +502,17 @@ class OpenhandsEnvironment:
 
             return prompt, response
 
-        def get_prompt_ids(messages: list[dict]) -> torch.Tensor:
-            prompt, _ = split_prompt_and_response(messages)
+        def get_prompt_response_ids(messages: list[dict]) -> torch.Tensor:
+            prompt, response = split_prompt_and_response(messages)
             if len(prompt) != 0:
-                input_ids = torch.cat([msg["token_ids"] for msg in prompt])
+                prompt_ids = torch.cat([msg["token_ids"] for msg in prompt])
             else:
-                input_ids = torch.tensor([])
-            return input_ids
+                prompt_ids = torch.tensor([])
+            if len(response) != 0:
+                response_ids = torch.cat([msg["token_ids"] for msg in response])
+            else:
+                response_ids = torch.tensor([])
+            return prompt_ids, response_ids
 
         result_dict = defaultdict(list)
 
@@ -537,11 +541,12 @@ class OpenhandsEnvironment:
                         message.pop("logprobs")
 
                 resolved = trajectory.get("resolved", False)
-                prompt_ids = get_prompt_ids(messages)
+                prompt_ids, response_ids = get_prompt_response_ids(messages)
 
                 # append to result_dict
                 result_dict["message_log"].append(messages)
                 result_dict["prompt_ids"].append(prompt_ids)
+                result_dict["response_ids"].append(response_ids)
                 # prompt length
                 result_dict["length"].append(len(prompt_ids))
                 result_dict["extra_env_info"].append(
@@ -564,14 +569,20 @@ class OpenhandsEnvironment:
                 # TODO: check
                 result_dict["loss_multiplier"].append(1.0)
 
-        # concat prompt_ids
-        prompt_ids = result_dict["prompt_ids"]
-        pad_value = self.tokenizer.pad_token_id
-        max_len = max(len(data) for data in prompt_ids)
-        padded_prompt_ids = [
-            _pad_tensor(data, max_len, "right", pad_value) for data in prompt_ids
-        ]
-        result_dict["prompt_ids"] = torch.stack(padded_prompt_ids)
+        # concat prompt/response ids
+        def concat_ids(ids_list: list[torch.Tensor], pad_side: str) -> torch.Tensor:
+            pad_value = self.tokenizer.pad_token_id
+            max_len = max(len(ids) for ids in ids_list)
+            padded_ids = [
+                _pad_tensor(ids, max_len, pad_side, pad_value) for ids in ids_list
+            ]
+            return torch.stack(padded_ids)
+
+        result_dict["prompt_ids_left_padded"] = concat_ids(
+            result_dict["prompt_ids"], "left"
+        )
+        result_dict["prompt_ids"] = concat_ids(result_dict["prompt_ids"], "right")
+        result_dict["response_ids"] = concat_ids(result_dict["response_ids"], "right")
 
         # convert to tensors
         result_dict["length"] = torch.tensor(result_dict["length"], dtype=torch.int32)
