@@ -1,0 +1,96 @@
+# GRPO-DAPO Configuration Example
+# This configuration enables Difficulty-Aware Policy Optimization (DAPO)
+# which filters easy/hard instances to focus on mixed-difficulty samples
+
+# Inherit from base GRPO config (adjust path as needed)
+# defaults:
+#   - grpo_math_1B
+
+# GRPO configuration with DAPO enabled
+grpo:
+  # DAPO specific configuration
+  dapo:
+    enable: true  # Enable DAPO filtering
+    # DAPO will filter instances where all trajectories succeed (too easy)
+    # or no trajectories succeed (too hard)
+  
+  # Standard GRPO settings
+  max_num_steps: 10000
+  max_num_epochs: 10
+  num_generations_per_prompt: 4  # Number of trajectories per prompt
+  max_rollout_turns: 10
+  val_at_start: true
+  val_period: 100
+  overlong_filtering: true
+  
+  # Advantage estimator
+  estimator:
+    name: "grpo"  # or "reinforce_plus_plus"
+    advantage_boost_value: 0.0
+    advantage_boost_threshold: 0.0
+
+# Data configuration
+data:
+  train_batch_size: 32  # Target batch size after DAPO filtering
+  train_data_path: "path/to/train.parquet"
+  val_data_path: "path/to/val.parquet"
+  use_raw_data: true  # Use raw data format for OpenHands
+
+# Environment configuration
+env:
+  do_rollout_in_env: true  # Use environment for rollouts (required for DAPO)
+
+# Policy configuration
+policy:
+  model_name: "Qwen/Qwen2.5-Math-1.5B"
+  max_total_sequence_length: 4096
+  
+  # Tokenizer
+  tokenizer:
+    name: "Qwen/Qwen2.5-Math-1.5B"
+    add_special_tokens: true
+  
+  # Generation configuration
+  generation:
+    vllm_cfg:
+      max_model_len: 4096
+      gpu_memory_utilization: 0.9
+      enable_chunked_prefill: true
+    
+    max_prompt_length: 2048
+    max_response_length: 2048
+    temperature: 0.7
+    top_p: 0.9
+    
+    # OpenHands specific settings
+    token_level_generation: true
+    openhands_num_workers: 64
+    native_tool_calling: true
+    strict_loop_detector: true
+    is_reasoning_task: true
+    
+    colocated:
+      enabled: false
+
+# Loss function
+loss_fn:
+  name: "policy_gradient"
+
+# Checkpointing
+checkpointing:
+  enabled: true
+  checkpoint_dir: "checkpoints/grpo_dapo"
+  period: 100
+
+# Logging
+logger:
+  type: "wandb"  # or "tensorboard"
+  log_dir: "logs/grpo_dapo"
+  project_name: "grpo_dapo_experiments"
+  experiment_name: "grpo_dapo_run"
+
+# Distributed training
+distributed:
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+
