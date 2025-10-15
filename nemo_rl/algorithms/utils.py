@@ -51,7 +51,7 @@ def calculate_kl_penalty(
         kl = -logr
 
     elif kl_type == "k2":
-        kl = logr**2 / 2
+        kl = torch.square(logr) / 2
 
     elif kl_type == "k3":
         kl = torch.exp(logr) - 1 - logr
