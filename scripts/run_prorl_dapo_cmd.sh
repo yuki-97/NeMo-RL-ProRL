@@ -31,8 +31,8 @@ OPENHANDS_TIMEOUT=300
 # run command
 UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
 UV_PROJECT_ENVIRONMENT=${NEMORL_DIR}/.venv NEMO_RL_VENV_DIR=${NEMORL_DIR}/venvs \
-NRL_FORCE_REBUILD_VENVS=false HF_HUB_ENABLE_HF_TRANSFER=0 \
-uv run python examples/run_grpo_openhands.py \
+NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
+uv run python examples/run_grpo_openhands_dapo.py \
     grpo.estimator.name=reinforce_plus_plus \
     grpo.estimator.minus_baseline=true \
     grpo.num_prompts_per_step=32 \

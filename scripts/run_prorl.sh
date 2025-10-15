@@ -1,16 +1,17 @@
 #!/bin/bash
 
 # environment variables (set to your own)
-export UV_CACHE_DIR=/lustre/fsw/portfolios/llmservice/users/haozh/cache/
+root_dir=/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/haozh
+
+export UV_CACHE_DIR=${root_dir}/cache/
 # export WANDB_API_KEY=c1ca9a6dd9f8115430c1e539af34615ea62267e3
 # export HF_TOKEN=
 # export HF_HOME=
 # export HF_DATASETS_CACHE=
-export NEMORL_DIR=/lustre/fsw/portfolios/llmservice/users/haozh/projects/NeMo-RL-ProRL
-export OPENHANDS_DIR=/lustre/fsw/portfolios/llmservice/users/haozh/projects/OpenHands_internal
+export NEMORL_DIR=${root_dir}/projects/NeMo-RL-ProRL
+export OPENHANDS_DIR=${root_dir}/new_openhands/OpenHands_internal_for_debug
 # tmp for sandbox
-export VERL_DIR=/lustre/fsw/portfolios/llmservice/users/haozh/projects/verl_internal
-
+export VERL_DIR=${root_dir}/projects/verl_internal
 PROJECT_NAME=prorl-yukih
 EXP_NAME=nemorl-promath-512-64-8k-$(date +%m%d)
 
@@ -76,15 +77,15 @@ uv run python examples/run_grpo_openhands.py \
 
 # launch job
 # COMMAND=${RUN_COMMAND} \
-CONTAINER=/lustre/fsw/portfolios/llmservice/users/haozh/dockers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
-OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fsw/portfolios/llmservice/users/haozh/singularity_images \
+CONTAINER=${root_dir}/dockers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
+OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fs1/portfolios/llmservice/users/shaokunz/Openhands2/OpenHands_internal/singularity_images_v2 \
 OPENHANDS_DIR=${OPENHANDS_DIR} \
 OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
 OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
 OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
 MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
 sbatch \
-    --account=llmservice_fm_vision \
+    --account=nvr_lpr_agentic \
     --job-name=${EXP_NAME} \
     --partition=interactive \
     --time=4:0:0 \

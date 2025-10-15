@@ -30,18 +30,17 @@ from nemo_rl.algorithms.grpo import (
     validate,
     maybe_gpu_profile_step,
 )
-from nemo_rl.checkpointing import CheckpointManager
+from nemo_rl.utils.checkpoint import CheckpointManager
 from nemo_rl.data.llm_message_utils import batched_message_log_to_flat_message
-from nemo_rl.distributed.batched_data_dict import BatchedDataDict, DatumSpec
-from nemo_rl.interfaces import (
-    ColocatablePolicyInterface,
-    EnvironmentInterface,
-    GenerationInterface,
-    Logger,
-    LossFunction,
-)
-from nemo_rl.nvidia.utils.timer import TimeoutChecker
-from nemo_rl.utils import Timer
+from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+from nemo_rl.algorithms.interfaces import LossFunction
+from nemo_rl.utils.logger import Logger
+from nemo_rl.environments.interfaces import EnvironmentInterface
+from nemo_rl.models.policy.interfaces import ColocatablePolicyInterface
+from nemo_rl.models.generation.interfaces import GenerationInterface
+
+
+from nemo_rl.utils.timer import TimeoutChecker, Timer
 
 
 def grpo_train_dapo(
@@ -59,32 +58,7 @@ def grpo_train_dapo(
     master_config: MasterConfig,
     processor: Optional[AutoProcessor] = None,
 ) -> None:
-    """Run GRPO-DAPO training algorithm.
     
-    This function implements the DAPO training loop, which differs from standard GRPO
-    by filtering instances based on trajectory success rates:
-    - Instances where all trajectories succeed are filtered (too easy)
-    - Instances where no trajectories succeed are filtered (too hard)
-    - Only instances with mixed success rates are used for training
-    
-    The environment manages data streaming and filtering internally, so this function
-    doesn't iterate over the dataloader directly.
-    
-    Args:
-        policy: The policy model to train
-        policy_generation: Generation interface (optional, can be same as policy)
-        dataloader: Training dataloader (passed to environment, not used directly here)
-        val_dataloader: Validation dataloader
-        tokenizer: Tokenizer for processing text
-        loss_fn: Loss function for policy optimization
-        task_to_env: Environment for training rollouts (must support DAPO)
-        val_task_to_env: Environment for validation rollouts
-        logger: Logger for metrics
-        checkpointer: Checkpoint manager
-        grpo_save_state: Training state dictionary
-        master_config: Complete configuration
-        processor: Optional processor for multimodal inputs
-    """
     timer = Timer()
     timeout = TimeoutChecker(
         timeout=master_config["checkpointing"]["checkpoint_must_save_by"],
@@ -112,7 +86,7 @@ def grpo_train_dapo(
     # DAPO specific config
     dapo_config = master_config["grpo"].get("dapo", {})
     assert dapo_config.get("enable", False), "DAPO must be enabled for grpo_train_dapo"
-    requested_batch_size = master_config["data"]["train_batch_size"]
+    requested_batch_size = master_config["grpo"]["num_prompts_per_step"]
 
     # Estimator config
     estimator_config = master_config["grpo"]["estimator"]
@@ -179,6 +153,9 @@ def grpo_train_dapo(
 
             # Generate responses with DAPO filtering
             # The environment handles data loading, filtering, and batch management
+
+
+
             print(
                 f"▶ Generating responses with DAPO filtering (target: {requested_batch_size} instances)...",
                 flush=True,
@@ -192,156 +169,312 @@ def grpo_train_dapo(
 
             print(f"✓ Generated batch with {repeated_batch.size} samples", flush=True)
 
-            # Data processing
+                
+
             with timer.time("data_processing"):
-                # Handle overlong filtering if enabled
                 use_overlong_filtering = master_config["grpo"]["overlong_filtering"]
                 if use_overlong_filtering:
-                    import torch
                     loss_multiplier = repeated_batch["loss_multiplier"].clone()
                     truncated = repeated_batch["truncated"]
-                    
+
                     if isinstance(truncated, list):
                         truncated = torch.tensor(truncated, dtype=torch.bool)
-                    
+
                     loss_multiplier[truncated] = 0
                     repeated_batch["loss_multiplier"] = loss_multiplier
-
-                # Add loss mask and advantages to messages
+                # Add loss mask and advantages to each message in LLMMessageLogType
                 for i, message_log in enumerate(repeated_batch["message_log"]):
                     for j, message in enumerate(message_log):
                         if message["role"] == "assistant":
                             message["token_loss_mask"] = torch.ones_like(
-                                message["token_ids"], dtype=torch.bool
+                                message["token_ids"]
+                            )
+                        else:
+                            message["token_loss_mask"] = torch.zeros_like(
+                                message["token_ids"]
+                            )
+                        if "generation_logprobs" not in message:
+                            message["generation_logprobs"] = torch.zeros_like(
+                                message["token_ids"], dtype=torch.float32
                             )
 
-                # Convert message log to flat format for training
-                batched_flat, input_lengths = batched_message_log_to_flat_message(
+                # Convert updated LLMMessageLogType to FlatMessagesType for training
+                flat_messages, input_lengths = batched_message_log_to_flat_message(
                     repeated_batch["message_log"],
                     pad_value_dict={"token_ids": tokenizer.pad_token_id},
+                    make_sequence_length_divisible_by=master_config["policy"][
+                        "make_sequence_length_divisible_by"
+                    ],
                 )
-                prompt_ids = repeated_batch["prompt_ids"]
 
-            # Prepare for training
-            print("▶ Preparing batch for training...", flush=True)
-            with timer.time("prepare_for_training"):
-                if NEED_REFIT:
-                    if colocated_inference:
-                        policy.onload_before_train()
-                    else:
-                        policy.prepare_for_training()
-
-            # Compute rewards and train
-            print("▶ Computing rewards and training...", flush=True)
-            with timer.time("train"):
-                output = policy.train_step(
-                    input_batch=repeated_batch,
-                    loss_fn=loss_fn,
-                    estimator=estimator,
-                    tokenizer=tokenizer,
-                    advantage_boost_value=advantage_boost_value,
-                    advantage_boost_threshold=advantage_boost_threshold,
+                # Create training data from flattened messages
+                train_data = BatchedDataDict[ClippedPGLossDataDict](
+                    {
+                        "input_ids": flat_messages["token_ids"],
+                        "input_lengths": input_lengths,
+                        "generation_logprobs": flat_messages["generation_logprobs"],
+                        "token_mask": flat_messages["token_loss_mask"],
+                        "sample_mask": repeated_batch["loss_multiplier"],
+                    }
                 )
-                
-                # Mark generation as stale after training
+                # this will be mini-batched inside the policy, so maintain the packed multimodal structure
+                train_data.update(
+                    flat_messages.get_multimodal_dict(as_tensors=False)
+                )
+                train_data.to("cpu")
+
+            print("▶ Preparing for logprob inference...", flush=True)
+            with timer.time("logprob_inference_prep"):
+                policy.prepare_for_lp_inference()
+
+            print("▶ Computing logprobs...", flush=True)
+            with timer.time("policy_and_reference_logprobs"):
+                fprop_logprobs = policy.get_logprobs(train_data)["logprobs"]
+                reference_logprobs = policy.get_reference_policy_logprobs(
+                    train_data
+                )["reference_logprobs"]
+                train_data["prev_logprobs"] = fprop_logprobs
+                train_data["reference_policy_logprobs"] = reference_logprobs
+
+            # Calculate rewards & advantages
+            with timer.time("reward_calculation"):
+                print("▶ Processing rewards...,", flush=True)
+
+                # Extract rewards from final_batch
+                rewards = repeated_batch["total_reward"]
+
+                # Get masks from train_data
+                token_mask = train_data["token_mask"]
+                sample_mask = train_data["sample_mask"]
+                mask = token_mask * sample_mask.unsqueeze(-1)
+
+                print("▶ Computing advantages...", flush=True)
+                train_data["advantages"] = estimator.compute_advantage(
+                    prompt_ids,
+                    rewards,
+                    mask,
+                    logprobs_policy=train_data["prev_logprobs"],
+                    logprobs_reference=train_data["reference_policy_logprobs"],
+                )
+                # Apply advantage boost
+                if advantage_boost_value > 0:
+                    train_data["advantages"] = boost_high_score_advantages(
+                        train_data["advantages"],
+                        rewards,
+                        advantage_boost_value,
+                        advantage_boost_threshold,
+                    )
+
+            print("▶ Preparing for training...", flush=True)
+            with timer.time("training_prep"):
+                policy.prepare_for_training()  # set model train and reload optim to GPU
                 POLICY_GENERATION_STALE = True
 
-            # Log rollout metrics
-            if rollout_metrics:
-                logger.log_metrics(rollout_metrics, total_steps, prefix="rollout")
+            print("▶ Training policy...", flush=True)
+            with timer.time("policy_training"):
+                train_results = policy.train(train_data, loss_fn)
 
-            # Log training metrics
-            training_metrics = output.get("metrics", {})
-            logger.log_metrics(training_metrics, total_steps, prefix="train")
+            is_last_step = (total_steps + 1 >= max_num_steps) or (
+                (current_epoch + 1 == max_num_epochs)
+                and (current_step + 1 == len(dataloader))
+            )
 
-            # Log timing metrics
-            timing_metrics = {}
-            for key, value in timer.get_all().items():
-                timing_metrics[f"timing/{key}"] = value
-            logger.log_metrics(timing_metrics, total_steps)
-            timer.reset()
-
-            # Checkpointing
-            is_last_step = total_steps + 1 >= max_num_steps
-            should_save = (
-                master_config["checkpointing"]["enabled"]
-                and master_config["checkpointing"]["period"] > 0
-                and (
-                    is_last_step
-                    or (total_steps + 1) % master_config["checkpointing"]["period"] == 0
-                )
-            ) or timeout.check_save()
-
-            if should_save:
-                print("💾 Saving checkpoint...", flush=True)
-                with timer.time("save_checkpoint"):
-                    grpo_save_state["total_steps"] = total_steps + 1
-                    grpo_save_state["current_epoch"] = current_epoch
-                    checkpointer.save(policy, grpo_save_state)
-                print(f"✓ Checkpoint saved at step {total_steps + 1}", flush=True)
-
-            # Validation
-            should_validate = (
-                val_period > 0
-                and (is_last_step or (total_steps + 1) % val_period == 0)
-            ) or (timeout.check_save() and timeout.last_saved)
-
-            if should_validate and val_task_to_env is not None:
-                print("🔍 Running validation...", flush=True)
-                with timer.time("validation"):
-                    if NEED_REFIT and POLICY_GENERATION_STALE:
-                        refit_policy_generation(
-                            policy, policy_generation, colocated_inference
-                        )
-                        POLICY_GENERATION_STALE = False
-                    else:
-                        policy_generation.prepare_for_generation()
-                    
-                    val_metrics, validation_timings = validate(
-                        policy_generation,
-                        val_dataloader,
-                        tokenizer,
-                        val_task_to_env,
-                        step=total_steps + 1,
-                        master_config=master_config,
+            # Run validation if it's a validation step
+            if val_period > 0 and (total_steps + 1) % val_period == 0:
+                if NEED_REFIT and POLICY_GENERATION_STALE:
+                    refit_policy_generation(
+                        policy, policy_generation, colocated_inference
                     )
-                    policy_generation.finish_generation()
-                
-                logger.log_metrics(val_metrics, total_steps + 1, prefix="validation")
+                    POLICY_GENERATION_STALE = False
+                else:
+                    if colocated_inference:
+                        policy.offload_after_refit()  # unload optimizer to make space for generation
+                    policy_generation.prepare_for_generation()
+                val_metrics, validation_timings = validate(
+                    policy_generation,
+                    val_dataloader,
+                    tokenizer,
+                    val_task_to_env,
+                    step=total_steps + 1,
+                    master_config=master_config,
+                )
+                policy_generation.finish_generation()
                 logger.log_metrics(
                     validation_timings, total_steps + 1, prefix="timing/validation"
                 )
-                print(f"✓ Validation complete", flush=True)
+                logger.log_metrics(
+                    val_metrics, total_steps + 1, prefix="validation"
+                )
+            metrics = {
+                "loss": train_results["loss"].numpy(),
+                "reward": rewards.numpy(),
+                "grad_norm": train_results["grad_norm"].numpy(),
+                "mean_prompt_length": repeated_batch["length"].numpy(),
+                "total_num_tokens": input_lengths.numpy(),
+            }
+            metrics.update(train_results["all_mb_metrics"])
+            for k, v in metrics.items():
+                if k in {
+                    "lr",
+                    "wd",
+                    "reward",
+                    "global_valid_seqs",
+                    "global_valid_toks",
+                    "mean_prompt_length",
+                }:
+                    metrics[k] = np.mean(v).item()
+                else:
+                    metrics[k] = np.sum(v).item()
+            metrics.update(rollout_metrics)
+            total_valid_tokens += metrics["global_valid_toks"]
 
-        # Update step counter
+            ## Checkpointing
+            consumed_samples += master_config["grpo"]["num_prompts_per_step"]
+            timeout.mark_iteration()
+
+            should_save_by_step = (
+                is_last_step
+                or (total_steps + 1) % master_config["checkpointing"]["save_period"]
+                == 0
+            )
+            # +1 because step is 0-indexed
+            # Check if timeout-based checkpointing is enabled in config.
+            should_save_by_timeout = timeout.check_save()
+
+            if master_config["checkpointing"]["enabled"] and (
+                should_save_by_step or should_save_by_timeout
+            ):
+                policy.prepare_for_training()
+
+                # +1 because step is 0-indexed
+                grpo_save_state["current_step"] = current_step + 1
+                grpo_save_state["total_steps"] = total_steps + 1
+                grpo_save_state["current_epoch"] = current_epoch
+                grpo_save_state["total_valid_tokens"] = total_valid_tokens
+                if val_metrics is not None:
+                    grpo_save_state["val_reward"] = val_metrics["accuracy"]
+                elif "val_reward" in grpo_save_state:
+                    del grpo_save_state["val_reward"]
+                grpo_save_state["consumed_samples"] = consumed_samples
+
+                if master_config["checkpointing"]["metric_name"] is not None:
+                    if (
+                        master_config["checkpointing"]["metric_name"]
+                        not in grpo_save_state
+                    ):
+                        warnings.warn(
+                            f"You asked to save checkpoints based on {master_config['checkpointing']['metric_name']} but the metric is not found in the save state. "
+                            "This checkpoint will not be saved as top-k."
+                        )
+
+                with timer.time("checkpointing"):
+                    print(
+                        f"Saving checkpoint for step {total_steps + 1}...",
+                        flush=True,
+                    )
+                    checkpoint_path = checkpointer.init_tmp_checkpoint(
+                        total_steps + 1, grpo_save_state, master_config
+                    )
+                    policy.save_checkpoint(
+                        weights_path=os.path.join(
+                            checkpoint_path, "policy", "weights"
+                        ),
+                        optimizer_path=os.path.join(
+                            checkpoint_path, "policy", "optimizer"
+                        ),
+                        tokenizer_path=os.path.join(
+                            checkpoint_path, "policy", "tokenizer"
+                        ),
+                        checkpointing_cfg=master_config["checkpointing"],
+                    )
+                    torch.save(
+                        dataloader.state_dict(),
+                        os.path.join(checkpoint_path, "train_dataloader.pt"),
+                    )
+                    checkpointer.finalize_checkpoint(checkpoint_path)
+
+        # Logging
+        # Log training data
+        log_data = {"content": flat_messages["content"]}
+        log_data["rewards"] = rewards.tolist()
+        log_data["generation_logprobs"] = train_data["generation_logprobs"].tolist()
+        log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
+        log_data["input_lengths"] = input_lengths.tolist()
+        logger.log_batched_dict_as_jsonl(
+            log_data, f"train_data_step{total_steps}.jsonl"
+        )
+
+        timing_metrics: dict[str, float] = timer.get_timing_metrics(
+            reduction_op="sum"
+        )  # type: ignore
+        # track example with high token mult prob error above 1.05
+        if metrics["token_mult_prob_error"] > 1.05:
+            logger.log_plot_token_mult_prob_error(
+                {
+                    "prompt_lengths": repeated_batch["length"],
+                    "full_lengths": input_lengths,
+                    "generation_logprobs": train_data["generation_logprobs"],
+                    "prev_logprobs": train_data["prev_logprobs"],
+                    "token_mask": train_data["token_mask"],
+                    "sample_mask": train_data["sample_mask"],
+                },
+                total_steps + 1,
+                name="train/token_mult_prob_error_plot_sample",
+            )
+        print("\n📊 Training Results:")
+
+        print(f"  • Loss: {metrics['loss']:.4f}")
+        print(f"  • Avg Reward: {np.mean(rewards.numpy()):.4f}")
+        print(
+            f"  • Mean Generation Length: {rollout_metrics['mean_gen_tokens_per_sample']:.4f}",
+            flush=True,
+        )
+
+        print("\n⏱️  Timing:", flush=True)
+        # Display total time first, separately
+        total_time = timing_metrics.get("total_step_time", 0)
+
+        number_of_samples_per_step = (
+            master_config["grpo"]["num_prompts_per_step"]
+            * master_config["grpo"]["num_generations_per_prompt"]
+        )
+        total_num_gpus = (
+            master_config["cluster"]["num_nodes"]
+            * master_config["cluster"]["gpus_per_node"]
+        )
+
+        print(f"  • Total step time: {total_time:.2f}s", flush=True)
+
+        # Display all other timing metrics
+        for k, v in sorted(
+            timing_metrics.items(), key=lambda item: item[1], reverse=True
+        ):
+            if k != "total_step_time":
+                percent = (v / total_time * 100) if total_time > 0 else 0
+                print(f"  • {k}: {v:.2f}s ({percent:.1f}%)", flush=True)
+
+        timing_metrics["valid_tokens_per_sec_per_gpu"] = (
+            metrics["global_valid_toks"] / total_time / total_num_gpus
+        )
+        performance_metrics = print_performance_metrics(
+            train_results, metrics, timing_metrics, master_config
+        )
+
+        logger.log_metrics(metrics, total_steps + 1, prefix="train")
+        logger.log_metrics(
+            performance_metrics, total_steps + 1, prefix="performance"
+        )
+        logger.log_metrics(timing_metrics, total_steps + 1, prefix="timing/train")
+
+        timer.reset()
+        current_step += 1
         total_steps += 1
-        grpo_save_state["total_steps"] = total_steps
-
-        # Check if we should continue to next epoch
-        if is_last_step:
-            print(f"\n{'=' * 25} Training Complete {'=' * 25}")
+        if should_save_by_timeout:
+            break
+        if total_steps >= max_num_steps:
             break
 
-    # Final validation if configured
-    if val_task_to_env is not None and not should_validate:
-        print("\n🔍 Running final validation...", flush=True)
-        if NEED_REFIT and POLICY_GENERATION_STALE:
-            refit_policy_generation(policy, policy_generation, colocated_inference)
-            POLICY_GENERATION_STALE = False
-        else:
-            policy_generation.prepare_for_generation()
-        
-        val_metrics, validation_timings = validate(
-            policy_generation,
-            val_dataloader,
-            tokenizer,
-            val_task_to_env,
-            step=total_steps,
-            master_config=master_config,
-        )
-        policy_generation.finish_generation()
-        logger.log_metrics(val_metrics, total_steps, prefix="validation")
-        logger.log_metrics(validation_timings, total_steps, prefix="timing/validation")
+    current_epoch += 1
+    current_step = 0  # Reset step counter for new epoch
 
-    print("\n✅ GRPO-DAPO training finished successfully!")
 
