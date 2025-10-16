@@ -25,7 +25,7 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
 from nemo_rl.distributed.virtual_cluster import init_ray
-from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
+from nemo_rl.environments.openhands_environment_dapo import OpenhandsEnvironmentDAPO
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.vllm import VllmGeneration
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
@@ -111,7 +111,7 @@ def setup_env(
     dp_size = policy_generation.dp_size
     server_urls = policy_generation.server_urls
 
-    env = OpenhandsEnvironment(
+    env = OpenhandsEnvironmentDAPO(
         config=master_config,
         tokenizer=tokenizer,
         server_addresses=server_urls,
@@ -187,6 +187,9 @@ def main() -> None:
         policy_generation,
         tokenizer,
     )
+
+    # Set the dataloader for DAPO streaming
+    env.data_loader = dataloader
 
     grpo_train(
         policy,

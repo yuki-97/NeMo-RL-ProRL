@@ -27,7 +27,7 @@ grpo:
     minus_baseline: null
   reward:
     - name: "stop_properly_penalty"
-      penalty_coef: 0
+      penalty_coef: 0.1
     - name: "length_penalty"
       penalty_type: "cosine"
       penalty_coef: 0
@@ -211,7 +211,9 @@ policy:
       use_deep_gemm: False
       num_last_layers_in_bf16: 0
       num_first_layers_in_bf16: 0
-    vllm_kwargs: {}
+    vllm_kwargs:
+      max_num_batched_tokens: 8192
+      max_num_seqs: 1024
     colocated:
       # true: generation shares training GPUs
       # false: uses dedicated generation resources

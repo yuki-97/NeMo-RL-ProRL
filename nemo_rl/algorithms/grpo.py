@@ -42,7 +42,6 @@ from nemo_rl.algorithms.utils import (
 from nemo_rl.data import DataConfig
 from nemo_rl.data.collate_fn import raw_data_collate_fn, rl_collate_fn
 from nemo_rl.data.datasets import AllTaskProcessedDataset
-from nemo_rl.data.interfaces import DatumSpec
 from nemo_rl.data.llm_message_utils import (
     batched_message_log_to_flat_message,
     get_keys_from_message_log,
@@ -206,7 +205,7 @@ def setup(
     use_raw_data = data_config.get("use_raw_data", False)
     dataloader = StatefulDataLoader(
         dataset,
-        batch_size=grpo_config["num_prompts_per_step"],
+        batch_size=1,
         shuffle=data_config["shuffle"],
         collate_fn=raw_data_collate_fn if use_raw_data else rl_collate_fn,
         drop_last=True,
@@ -636,6 +635,9 @@ def grpo_train(
     val_period = master_config["grpo"]["val_period"]
     colocated_inference = master_config["policy"]["generation"]["colocated"]["enabled"]
 
+    # dapo
+    requested_batch_size = master_config["grpo"]["num_prompts_per_step"]
+
     # reward shaping
     reward_config_list = master_config["grpo"]["reward"]
     reward_shaping = RewardShapingManager(reward_config_list)
@@ -679,413 +681,365 @@ def grpo_train(
         logger.log_metrics(validation_timings, current_step, prefix="timing/validation")
 
     while current_epoch < max_num_epochs and total_steps < max_num_steps:
-        print(f"\n{'=' * 25} Epoch {current_epoch + 1}/{max_num_epochs} {'=' * 25}")
-        # Run grpo training (single-turn)
-        batch: BatchedDataDict[DatumSpec]
+        print(
+            f"\n{'=' * 25} Step {current_step + 1}/{min(len(dataloader), max_num_steps)} {'=' * 25}",
+            flush=True,
+        )
+        maybe_gpu_profile_step(policy, total_steps + 1)
+        if policy != policy_generation:
+            maybe_gpu_profile_step(policy_generation, total_steps + 1)
+        val_metrics, validation_timings = None, None
 
-        for batch in dataloader:
-            print(
-                f"\n{'=' * 25} Step {current_step + 1}/{min(len(dataloader), max_num_steps)} {'=' * 25}",
-                flush=True,
-            )
-            maybe_gpu_profile_step(policy, total_steps + 1)
-            if policy != policy_generation:
-                maybe_gpu_profile_step(policy_generation, total_steps + 1)
-            val_metrics, validation_timings = None, None
-
-            with timer.time("total_step_time"):
-                # Prepare batch
-                print("▶ Preparing batch...", flush=True)
-                if not master_config["data"].get("use_raw_data", False):
-                    with timer.time("data_processing"):
-                        # Repeat batch items
-                        repeated_batch: BatchedDataDict[DatumSpec] = (
-                            batch.repeat_interleave(
-                                master_config["grpo"]["num_generations_per_prompt"]
-                            )
-                        )
-                        # Convert LLMMessageLogType to FlatMessagesType for generation
-                        batched_flat, input_lengths = (
-                            batched_message_log_to_flat_message(
-                                repeated_batch["message_log"],
-                                pad_value_dict={"token_ids": tokenizer.pad_token_id},
-                            )
-                        )
-                        prompt_ids = batched_flat["token_ids"]
+        with timer.time("total_step_time"):
+            with timer.time("prepare_for_generation/total"):
+                if NEED_REFIT and POLICY_GENERATION_STALE:
+                    refit_policy_generation(
+                        policy, policy_generation, colocated_inference, timer=timer
+                    )
+                    POLICY_GENERATION_STALE = False
                 else:
-                    repeated_batch = batch
+                    if colocated_inference:
+                        policy.offload_after_refit()  # unload optimizer to make space for generation
+                    policy_generation.prepare_for_generation()
 
-                # Generate responses - this updates the LLMMessageLogType in repeated_batch
-                print(
-                    f"▶ Generating responses for batch of size {repeated_batch.size}...",
-                    flush=True,
-                )
-                with timer.time("prepare_for_generation/total"):
-                    if NEED_REFIT and POLICY_GENERATION_STALE:
-                        refit_policy_generation(
-                            policy, policy_generation, colocated_inference, timer=timer
-                        )
-                        POLICY_GENERATION_STALE = False
-                    else:
-                        if colocated_inference:
-                            policy.offload_after_refit()  # unload optimizer to make space for generation
-                        policy_generation.prepare_for_generation()
-
-                with timer.time("generation"):
-                    # Run rollouts in the environment
-                    if _should_use_rollout_in_env(master_config):
-                        repeated_batch, rollout_metrics = task_to_env.run_async_rollout(
-                            repeated_batch
-                        )
-                    # Use async rollouts if vLLM async engine is enabled
-                    elif _should_use_async_rollouts(master_config):
-                        (
-                            repeated_batch,
-                            rollout_metrics,
-                        ) = run_async_multi_turn_rollout(
-                            policy_generation=policy_generation,
-                            input_batch=repeated_batch,
-                            tokenizer=tokenizer,
-                            task_to_env=task_to_env,
-                            max_seq_len=master_config["policy"][
-                                "max_total_sequence_length"
-                            ],
-                            max_rollout_turns=master_config["grpo"][
-                                "max_rollout_turns"
-                            ],
-                            greedy=False,
-                        )
-                    else:
-                        repeated_batch, rollout_metrics = run_multi_turn_rollout(
-                            policy_generation=policy_generation,
-                            input_batch=repeated_batch,
-                            tokenizer=tokenizer,
-                            task_to_env=task_to_env,
-                            max_seq_len=master_config["policy"][
-                                "max_total_sequence_length"
-                            ],
-                            max_rollout_turns=master_config["grpo"][
-                                "max_rollout_turns"
-                            ],
-                            greedy=False,
-                        )
-                    if master_config["data"].get("use_raw_data", False):
-                        prompt_ids = repeated_batch["prompt_ids"]
-                    policy_generation.finish_generation()
-
-                with timer.time("data_processing"):
-                    use_overlong_filtering = master_config["grpo"]["overlong_filtering"]
-                    if use_overlong_filtering:
-                        loss_multiplier = repeated_batch["loss_multiplier"].clone()
-                        truncated = repeated_batch["truncated"]
-
-                        if isinstance(truncated, list):
-                            truncated = torch.tensor(truncated, dtype=torch.bool)
-
-                        loss_multiplier[truncated] = 0
-                        repeated_batch["loss_multiplier"] = loss_multiplier
-                    # Add loss mask and advantages to each message in LLMMessageLogType
-                    for i, message_log in enumerate(repeated_batch["message_log"]):
-                        for j, message in enumerate(message_log):
-                            if message["role"] == "assistant":
-                                message["token_loss_mask"] = torch.ones_like(
-                                    message["token_ids"]
-                                )
-                            else:
-                                message["token_loss_mask"] = torch.zeros_like(
-                                    message["token_ids"]
-                                )
-                            if "generation_logprobs" not in message:
-                                message["generation_logprobs"] = torch.zeros_like(
-                                    message["token_ids"], dtype=torch.float32
-                                )
-
-                    # Convert updated LLMMessageLogType to FlatMessagesType for training
-                    flat_messages, input_lengths = batched_message_log_to_flat_message(
-                        repeated_batch["message_log"],
-                        pad_value_dict={"token_ids": tokenizer.pad_token_id},
-                        make_sequence_length_divisible_by=master_config["policy"][
-                            "make_sequence_length_divisible_by"
+            with timer.time("generation"):
+                # Run rollouts in the environment
+                if _should_use_rollout_in_env(master_config):
+                    repeated_batch, rollout_metrics = (
+                        task_to_env.run_async_rollout_dapo(requested_batch_size)
+                    )
+                # Use async rollouts if vLLM async engine is enabled
+                elif _should_use_async_rollouts(master_config):
+                    (
+                        repeated_batch,
+                        rollout_metrics,
+                    ) = run_async_multi_turn_rollout(
+                        policy_generation=policy_generation,
+                        input_batch=repeated_batch,
+                        tokenizer=tokenizer,
+                        task_to_env=task_to_env,
+                        max_seq_len=master_config["policy"][
+                            "max_total_sequence_length"
                         ],
+                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                        greedy=False,
                     )
-
-                    # Create training data from flattened messages
-                    train_data = BatchedDataDict[ClippedPGLossDataDict](
-                        {
-                            "input_ids": flat_messages["token_ids"],
-                            "input_lengths": input_lengths,
-                            "generation_logprobs": flat_messages["generation_logprobs"],
-                            "token_mask": flat_messages["token_loss_mask"],
-                            "sample_mask": repeated_batch["loss_multiplier"],
-                        }
+                else:
+                    repeated_batch, rollout_metrics = run_multi_turn_rollout(
+                        policy_generation=policy_generation,
+                        input_batch=repeated_batch,
+                        tokenizer=tokenizer,
+                        task_to_env=task_to_env,
+                        max_seq_len=master_config["policy"][
+                            "max_total_sequence_length"
+                        ],
+                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                        greedy=False,
                     )
-                    # this will be mini-batched inside the policy, so maintain the packed multimodal structure
-                    train_data.update(
-                        flat_messages.get_multimodal_dict(as_tensors=False)
-                    )
-                    train_data.to("cpu")
+                if master_config["data"].get("use_raw_data", False):
+                    prompt_ids = repeated_batch["prompt_ids"]
+                policy_generation.finish_generation()
 
-                print("▶ Preparing for logprob inference...", flush=True)
-                with timer.time("logprob_inference_prep"):
-                    policy.prepare_for_lp_inference()
+            with timer.time("data_processing"):
+                use_overlong_filtering = master_config["grpo"]["overlong_filtering"]
+                if use_overlong_filtering:
+                    loss_multiplier = repeated_batch["loss_multiplier"].clone()
+                    truncated = repeated_batch["truncated"]
 
-                print("▶ Computing logprobs...", flush=True)
-                with timer.time("policy_and_reference_logprobs"):
-                    fprop_logprobs = policy.get_logprobs(train_data)["logprobs"]
-                    reference_logprobs = policy.get_reference_policy_logprobs(
-                        train_data
-                    )["reference_logprobs"]
-                    train_data["prev_logprobs"] = fprop_logprobs
-                    train_data["reference_policy_logprobs"] = reference_logprobs
+                    if isinstance(truncated, list):
+                        truncated = torch.tensor(truncated, dtype=torch.bool)
 
-                # Calculate rewards & advantages
-                with timer.time("reward_calculation"):
-                    print("▶ Processing rewards...,", flush=True)
-
-                    # Apply reward shaping
-                    reward_shaping_kwargs = {
-                        "token_ids": train_data["input_ids"],
-                        "prompt_ids": repeated_batch["prompt_ids_left_padded"],
-                        "response_ids": repeated_batch["response_ids"],
-                        "token_mask": train_data["token_mask"],
-                        "truncated": repeated_batch["truncated"],
-                    }
-                    rewards = repeated_batch["total_reward"]
-                    rewards = reward_shaping(rewards, **reward_shaping_kwargs)
-
-                    # Get masks from train_data
-                    token_mask = train_data["token_mask"]
-                    sample_mask = train_data["sample_mask"]
-                    mask = token_mask * sample_mask.unsqueeze(-1)
-
-                    print("▶ Computing advantages...", flush=True)
-                    train_data["advantages"] = estimator.compute_advantage(
-                        prompt_ids,
-                        rewards,
-                        mask,
-                        logprobs_policy=train_data["prev_logprobs"],
-                        logprobs_reference=train_data["reference_policy_logprobs"],
-                    )
-                    # Apply advantage boost
-                    if advantage_boost_value > 0:
-                        train_data["advantages"] = boost_high_score_advantages(
-                            train_data["advantages"],
-                            rewards,
-                            advantage_boost_value,
-                            advantage_boost_threshold,
-                        )
-
-                print("▶ Preparing for training...", flush=True)
-                with timer.time("training_prep"):
-                    policy.prepare_for_training()  # set model train and reload optim to GPU
-                    POLICY_GENERATION_STALE = True
-
-                print("▶ Training policy...", flush=True)
-                with timer.time("policy_training"):
-                    train_results = policy.train(train_data, loss_fn)
-
-                is_last_step = (total_steps + 1 >= max_num_steps) or (
-                    (current_epoch + 1 == max_num_epochs)
-                    and (current_step + 1 == len(dataloader))
-                )
-
-                # Run validation if it's a validation step
-                if val_period > 0 and (total_steps + 1) % val_period == 0:
-                    if NEED_REFIT and POLICY_GENERATION_STALE:
-                        refit_policy_generation(
-                            policy, policy_generation, colocated_inference
-                        )
-                        POLICY_GENERATION_STALE = False
-                    else:
-                        if colocated_inference:
-                            policy.offload_after_refit()  # unload optimizer to make space for generation
-                        policy_generation.prepare_for_generation()
-                    val_metrics, validation_timings = validate(
-                        policy_generation,
-                        val_dataloader,
-                        tokenizer,
-                        val_task_to_env,
-                        step=total_steps + 1,
-                        master_config=master_config,
-                    )
-                    policy_generation.finish_generation()
-                    logger.log_metrics(
-                        validation_timings, total_steps + 1, prefix="timing/validation"
-                    )
-                    logger.log_metrics(
-                        val_metrics, total_steps + 1, prefix="validation"
-                    )
-                metrics = {
-                    "loss": train_results["loss"].numpy(),
-                    "reward": rewards.numpy(),
-                    "grad_norm": train_results["grad_norm"].numpy(),
-                    "mean_prompt_length": repeated_batch["length"].numpy(),
-                    "total_num_tokens": input_lengths.numpy(),
-                }
-                metrics.update(train_results["all_mb_metrics"])
-                for k, v in metrics.items():
-                    if k in {
-                        "lr",
-                        "wd",
-                        "reward",
-                        "global_valid_seqs",
-                        "global_valid_toks",
-                        "mean_prompt_length",
-                    }:
-                        metrics[k] = np.mean(v).item()
-                    else:
-                        metrics[k] = np.sum(v).item()
-                metrics.update(rollout_metrics)
-                total_valid_tokens += metrics["global_valid_toks"]
-
-                ## Checkpointing
-                consumed_samples += master_config["grpo"]["num_prompts_per_step"]
-                timeout.mark_iteration()
-
-                should_save_by_step = (
-                    is_last_step
-                    or (total_steps + 1) % master_config["checkpointing"]["save_period"]
-                    == 0
-                )
-                # +1 because step is 0-indexed
-                # Check if timeout-based checkpointing is enabled in config.
-                should_save_by_timeout = timeout.check_save()
-
-                if master_config["checkpointing"]["enabled"] and (
-                    should_save_by_step or should_save_by_timeout
-                ):
-                    policy.prepare_for_training()
-
-                    # +1 because step is 0-indexed
-                    grpo_save_state["current_step"] = current_step + 1
-                    grpo_save_state["total_steps"] = total_steps + 1
-                    grpo_save_state["current_epoch"] = current_epoch
-                    grpo_save_state["total_valid_tokens"] = total_valid_tokens
-                    if val_metrics is not None:
-                        grpo_save_state["val_reward"] = val_metrics["accuracy"]
-                    elif "val_reward" in grpo_save_state:
-                        del grpo_save_state["val_reward"]
-                    grpo_save_state["consumed_samples"] = consumed_samples
-
-                    if master_config["checkpointing"]["metric_name"] is not None:
-                        if (
-                            master_config["checkpointing"]["metric_name"]
-                            not in grpo_save_state
-                        ):
-                            warnings.warn(
-                                f"You asked to save checkpoints based on {master_config['checkpointing']['metric_name']} but the metric is not found in the save state. "
-                                "This checkpoint will not be saved as top-k."
+                    loss_multiplier[truncated] = 0
+                    repeated_batch["loss_multiplier"] = loss_multiplier
+                # Add loss mask and advantages to each message in LLMMessageLogType
+                for i, message_log in enumerate(repeated_batch["message_log"]):
+                    for j, message in enumerate(message_log):
+                        if message["role"] == "assistant":
+                            message["token_loss_mask"] = torch.ones_like(
+                                message["token_ids"]
+                            )
+                        else:
+                            message["token_loss_mask"] = torch.zeros_like(
+                                message["token_ids"]
+                            )
+                        if "generation_logprobs" not in message:
+                            message["generation_logprobs"] = torch.zeros_like(
+                                message["token_ids"], dtype=torch.float32
                             )
 
-                    with timer.time("checkpointing"):
-                        print(
-                            f"Saving checkpoint for step {total_steps + 1}...",
-                            flush=True,
-                        )
-                        checkpoint_path = checkpointer.init_tmp_checkpoint(
-                            total_steps + 1, grpo_save_state, master_config
-                        )
-                        policy.save_checkpoint(
-                            weights_path=os.path.join(
-                                checkpoint_path, "policy", "weights"
-                            ),
-                            optimizer_path=os.path.join(
-                                checkpoint_path, "policy", "optimizer"
-                            ),
-                            tokenizer_path=os.path.join(
-                                checkpoint_path, "policy", "tokenizer"
-                            ),
-                            checkpointing_cfg=master_config["checkpointing"],
-                        )
-                        torch.save(
-                            dataloader.state_dict(),
-                            os.path.join(checkpoint_path, "train_dataloader.pt"),
-                        )
-                        checkpointer.finalize_checkpoint(checkpoint_path)
-
-            # Logging
-            # Log training data
-            log_data = {"content": flat_messages["content"]}
-            log_data["rewards"] = rewards.tolist()
-            log_data["generation_logprobs"] = train_data["generation_logprobs"].tolist()
-            log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
-            log_data["input_lengths"] = input_lengths.tolist()
-            logger.log_batched_dict_as_jsonl(
-                log_data, f"train_data_step{total_steps}.jsonl"
-            )
-
-            timing_metrics: dict[str, float] = timer.get_timing_metrics(
-                reduction_op="sum"
-            )  # type: ignore
-            # track example with high token mult prob error above 1.05
-            if metrics["token_mult_prob_error"] > 1.05:
-                logger.log_plot_token_mult_prob_error(
-                    {
-                        "prompt_lengths": repeated_batch["length"],
-                        "full_lengths": input_lengths,
-                        "generation_logprobs": train_data["generation_logprobs"],
-                        "prev_logprobs": train_data["prev_logprobs"],
-                        "token_mask": train_data["token_mask"],
-                        "sample_mask": train_data["sample_mask"],
-                    },
-                    total_steps + 1,
-                    name="train/token_mult_prob_error_plot_sample",
+                # Convert updated LLMMessageLogType to FlatMessagesType for training
+                flat_messages, input_lengths = batched_message_log_to_flat_message(
+                    repeated_batch["message_log"],
+                    pad_value_dict={"token_ids": tokenizer.pad_token_id},
+                    make_sequence_length_divisible_by=master_config["policy"][
+                        "make_sequence_length_divisible_by"
+                    ],
                 )
-            print("\n📊 Training Results:")
 
-            print(f"  • Loss: {metrics['loss']:.4f}")
-            print(f"  • Avg Reward: {np.mean(rewards.numpy()):.4f}")
-            print(
-                f"  • Mean Generation Length: {rollout_metrics['mean_gen_tokens_per_sample']:.4f}",
-                flush=True,
+                # Create training data from flattened messages
+                train_data = BatchedDataDict[ClippedPGLossDataDict](
+                    {
+                        "input_ids": flat_messages["token_ids"],
+                        "input_lengths": input_lengths,
+                        "generation_logprobs": flat_messages["generation_logprobs"],
+                        "token_mask": flat_messages["token_loss_mask"],
+                        "sample_mask": repeated_batch["loss_multiplier"],
+                    }
+                )
+                # this will be mini-batched inside the policy, so maintain the packed multimodal structure
+                train_data.update(flat_messages.get_multimodal_dict(as_tensors=False))
+                train_data.to("cpu")
+
+            print("▶ Preparing for logprob inference...", flush=True)
+            with timer.time("logprob_inference_prep"):
+                policy.prepare_for_lp_inference()
+
+            print("▶ Computing logprobs...", flush=True)
+            with timer.time("policy_and_reference_logprobs"):
+                fprop_logprobs = policy.get_logprobs(train_data)["logprobs"]
+                reference_logprobs = policy.get_reference_policy_logprobs(train_data)[
+                    "reference_logprobs"
+                ]
+                train_data["prev_logprobs"] = fprop_logprobs
+                train_data["reference_policy_logprobs"] = reference_logprobs
+
+            # Calculate rewards & advantages
+            with timer.time("reward_calculation"):
+                print("▶ Processing rewards...,", flush=True)
+
+                # Apply reward shaping
+                reward_shaping_kwargs = {
+                    "token_ids": train_data["input_ids"],
+                    "prompt_ids": repeated_batch["prompt_ids_left_padded"],
+                    "response_ids": repeated_batch["response_ids"],
+                    "token_mask": train_data["token_mask"],
+                    "truncated": repeated_batch["truncated"],
+                }
+                rewards = repeated_batch["total_reward"]
+                rewards = reward_shaping(rewards, **reward_shaping_kwargs)
+
+                # Get masks from train_data
+                token_mask = train_data["token_mask"]
+                sample_mask = train_data["sample_mask"]
+                mask = token_mask * sample_mask.unsqueeze(-1)
+
+                print("▶ Computing advantages...", flush=True)
+                train_data["advantages"] = estimator.compute_advantage(
+                    prompt_ids,
+                    rewards,
+                    mask,
+                    logprobs_policy=train_data["prev_logprobs"],
+                    logprobs_reference=train_data["reference_policy_logprobs"],
+                )
+                # Apply advantage boost
+                if advantage_boost_value > 0:
+                    train_data["advantages"] = boost_high_score_advantages(
+                        train_data["advantages"],
+                        rewards,
+                        advantage_boost_value,
+                        advantage_boost_threshold,
+                    )
+
+            print("▶ Preparing for training...", flush=True)
+            with timer.time("training_prep"):
+                policy.prepare_for_training()  # set model train and reload optim to GPU
+                POLICY_GENERATION_STALE = True
+
+            print("▶ Training policy...", flush=True)
+            with timer.time("policy_training"):
+                train_results = policy.train(train_data, loss_fn)
+
+            is_last_step = (total_steps + 1 >= max_num_steps) or (
+                (current_epoch + 1 == max_num_epochs)
+                and (current_step + 1 == len(dataloader))
             )
 
-            print("\n⏱️  Timing:", flush=True)
-            # Display total time first, separately
-            total_time = timing_metrics.get("total_step_time", 0)
+            # Run validation if it's a validation step
+            if val_period > 0 and (total_steps + 1) % val_period == 0:
+                if NEED_REFIT and POLICY_GENERATION_STALE:
+                    refit_policy_generation(
+                        policy, policy_generation, colocated_inference
+                    )
+                    POLICY_GENERATION_STALE = False
+                else:
+                    if colocated_inference:
+                        policy.offload_after_refit()  # unload optimizer to make space for generation
+                    policy_generation.prepare_for_generation()
+                val_metrics, validation_timings = validate(
+                    policy_generation,
+                    val_dataloader,
+                    tokenizer,
+                    val_task_to_env,
+                    step=total_steps + 1,
+                    master_config=master_config,
+                )
+                policy_generation.finish_generation()
+                logger.log_metrics(
+                    validation_timings, total_steps + 1, prefix="timing/validation"
+                )
+                logger.log_metrics(val_metrics, total_steps + 1, prefix="validation")
+            metrics = {
+                "loss": train_results["loss"].numpy(),
+                "reward": rewards.numpy(),
+                "grad_norm": train_results["grad_norm"].numpy(),
+                "mean_prompt_length": repeated_batch["length"].numpy(),
+                "total_num_tokens": input_lengths.numpy(),
+            }
+            metrics.update(train_results["all_mb_metrics"])
+            for k, v in metrics.items():
+                if k in {
+                    "lr",
+                    "wd",
+                    "reward",
+                    "global_valid_seqs",
+                    "global_valid_toks",
+                    "mean_prompt_length",
+                }:
+                    metrics[k] = np.mean(v).item()
+                else:
+                    metrics[k] = np.sum(v).item()
+            metrics.update(rollout_metrics)
+            total_valid_tokens += metrics["global_valid_toks"]
 
-            number_of_samples_per_step = (
-                master_config["grpo"]["num_prompts_per_step"]
-                * master_config["grpo"]["num_generations_per_prompt"]
+            ## Checkpointing
+            consumed_samples += master_config["grpo"]["num_prompts_per_step"]
+            timeout.mark_iteration()
+
+            should_save_by_step = (
+                is_last_step
+                or (total_steps + 1) % master_config["checkpointing"]["save_period"]
+                == 0
             )
-            total_num_gpus = (
-                master_config["cluster"]["num_nodes"]
-                * master_config["cluster"]["gpus_per_node"]
-            )
+            # +1 because step is 0-indexed
+            # Check if timeout-based checkpointing is enabled in config.
+            should_save_by_timeout = timeout.check_save()
 
-            print(f"  • Total step time: {total_time:.2f}s", flush=True)
-
-            # Display all other timing metrics
-            for k, v in sorted(
-                timing_metrics.items(), key=lambda item: item[1], reverse=True
+            if master_config["checkpointing"]["enabled"] and (
+                should_save_by_step or should_save_by_timeout
             ):
-                if k != "total_step_time":
-                    percent = (v / total_time * 100) if total_time > 0 else 0
-                    print(f"  • {k}: {v:.2f}s ({percent:.1f}%)", flush=True)
+                policy.prepare_for_training()
 
-            timing_metrics["valid_tokens_per_sec_per_gpu"] = (
-                metrics["global_valid_toks"] / total_time / total_num_gpus
+                # +1 because step is 0-indexed
+                grpo_save_state["current_step"] = current_step + 1
+                grpo_save_state["total_steps"] = total_steps + 1
+                grpo_save_state["current_epoch"] = current_epoch
+                grpo_save_state["total_valid_tokens"] = total_valid_tokens
+                if val_metrics is not None:
+                    grpo_save_state["val_reward"] = val_metrics["accuracy"]
+                elif "val_reward" in grpo_save_state:
+                    del grpo_save_state["val_reward"]
+                grpo_save_state["consumed_samples"] = consumed_samples
+
+                if master_config["checkpointing"]["metric_name"] is not None:
+                    if (
+                        master_config["checkpointing"]["metric_name"]
+                        not in grpo_save_state
+                    ):
+                        warnings.warn(
+                            f"You asked to save checkpoints based on {master_config['checkpointing']['metric_name']} but the metric is not found in the save state. "
+                            "This checkpoint will not be saved as top-k."
+                        )
+
+                with timer.time("checkpointing"):
+                    print(
+                        f"Saving checkpoint for step {total_steps + 1}...",
+                        flush=True,
+                    )
+                    checkpoint_path = checkpointer.init_tmp_checkpoint(
+                        total_steps + 1, grpo_save_state, master_config
+                    )
+                    policy.save_checkpoint(
+                        weights_path=os.path.join(checkpoint_path, "policy", "weights"),
+                        optimizer_path=os.path.join(
+                            checkpoint_path, "policy", "optimizer"
+                        ),
+                        tokenizer_path=os.path.join(
+                            checkpoint_path, "policy", "tokenizer"
+                        ),
+                        checkpointing_cfg=master_config["checkpointing"],
+                    )
+                    torch.save(
+                        dataloader.state_dict(),
+                        os.path.join(checkpoint_path, "train_dataloader.pt"),
+                    )
+                    checkpointer.finalize_checkpoint(checkpoint_path)
+
+        # Logging
+        # Log training data
+        log_data = {"content": flat_messages["content"]}
+        log_data["rewards"] = rewards.tolist()
+        log_data["generation_logprobs"] = train_data["generation_logprobs"].tolist()
+        log_data["prev_logprobs"] = train_data["prev_logprobs"].tolist()
+        log_data["input_lengths"] = input_lengths.tolist()
+        logger.log_batched_dict_as_jsonl(
+            log_data, f"train_data_step{total_steps}.jsonl"
+        )
+
+        timing_metrics: dict[str, float] = timer.get_timing_metrics(reduction_op="sum")  # type: ignore
+        # track example with high token mult prob error above 1.05
+        if metrics["token_mult_prob_error"] > 1.05:
+            logger.log_plot_token_mult_prob_error(
+                {
+                    "prompt_lengths": repeated_batch["length"],
+                    "full_lengths": input_lengths,
+                    "generation_logprobs": train_data["generation_logprobs"],
+                    "prev_logprobs": train_data["prev_logprobs"],
+                    "token_mask": train_data["token_mask"],
+                    "sample_mask": train_data["sample_mask"],
+                },
+                total_steps + 1,
+                name="train/token_mult_prob_error_plot_sample",
             )
-            performance_metrics = print_performance_metrics(
-                train_results, metrics, timing_metrics, master_config
-            )
+        print("\n📊 Training Results:")
 
-            logger.log_metrics(metrics, total_steps + 1, prefix="train")
-            logger.log_metrics(
-                performance_metrics, total_steps + 1, prefix="performance"
-            )
-            logger.log_metrics(timing_metrics, total_steps + 1, prefix="timing/train")
+        print(f"  • Loss: {metrics['loss']:.4f}")
+        print(f"  • Avg Reward: {np.mean(rewards.numpy()):.4f}")
+        print(
+            f"  • Mean Generation Length: {rollout_metrics['mean_gen_tokens_per_sample']:.4f}",
+            flush=True,
+        )
 
-            timer.reset()
-            current_step += 1
-            total_steps += 1
-            if should_save_by_timeout:
-                break
-            if total_steps >= max_num_steps:
-                break
+        print("\n⏱️  Timing:", flush=True)
+        # Display total time first, separately
+        total_time = timing_metrics.get("total_step_time", 0)
 
-        current_epoch += 1
-        current_step = 0  # Reset step counter for new epoch
+        number_of_samples_per_step = (
+            master_config["grpo"]["num_prompts_per_step"]
+            * master_config["grpo"]["num_generations_per_prompt"]
+        )
+        total_num_gpus = (
+            master_config["cluster"]["num_nodes"]
+            * master_config["cluster"]["gpus_per_node"]
+        )
+
+        print(f"  • Total step time: {total_time:.2f}s", flush=True)
+
+        # Display all other timing metrics
+        for k, v in sorted(
+            timing_metrics.items(), key=lambda item: item[1], reverse=True
+        ):
+            if k != "total_step_time":
+                percent = (v / total_time * 100) if total_time > 0 else 0
+                print(f"  • {k}: {v:.2f}s ({percent:.1f}%)", flush=True)
+
+        timing_metrics["valid_tokens_per_sec_per_gpu"] = (
+            metrics["global_valid_toks"] / total_time / total_num_gpus
+        )
+        performance_metrics = print_performance_metrics(
+            train_results, metrics, timing_metrics, master_config
+        )
+
+        logger.log_metrics(metrics, total_steps + 1, prefix="train")
+        logger.log_metrics(performance_metrics, total_steps + 1, prefix="performance")
+        logger.log_metrics(timing_metrics, total_steps + 1, prefix="timing/train")
+
+        timer.reset()
+        current_step += 1
+        total_steps += 1
+        if should_save_by_timeout:
+            break
+        if total_steps >= max_num_steps:
+            break
 
 
 def validate(
