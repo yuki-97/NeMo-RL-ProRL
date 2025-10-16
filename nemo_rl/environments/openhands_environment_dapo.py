@@ -4,6 +4,8 @@ import time
 from typing import List
 
 import torch
+from torchdata.stateful_dataloader import StatefulDataLoader
+from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -26,7 +28,12 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
     """
 
     def __init__(
-        self, config: MasterConfig, tokenizer, server_addresses: List[str], dp_size: int
+        self,
+        config: MasterConfig,
+        tokenizer: PreTrainedTokenizerBase,
+        server_addresses: List[str],
+        dp_size: int,
+        dataloader: StatefulDataLoader,
     ):
         """Initialize OpenhandsEnvironmentDAPO.
 
@@ -35,11 +42,13 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
             tokenizer: Tokenizer instance
             server_addresses (List[str]): List of server addresses
             dp_size (int): Data parallel size
+            dataloader (StatefulDataLoader): Data loader for streaming data
         """
         super().__init__(config, tokenizer, server_addresses, dp_size)
 
         # DAPO-specific initialization
-        self.data_loader = None  # Will be set externally
+        self.dataloader = dataloader
+        self.dataloader_iter = iter(self.dataloader)
         self.all_input_batch = None  # Accumulated input batches
         self.last_data_index = 0  # Track position in data stream
         self.job_queue = asyncio.PriorityQueue()  # Priority queue for job scheduling
@@ -97,15 +106,15 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         Returns:
             tuple[BatchedDataDict, int]: New batch and updated data index
         """
-        assert self.data_loader is not None, (
-            "data_loader must be set before calling refill_job_queue"
-        )
-
         # Get next batch from dataloader
-        next_batch_data = next(iter(self.data_loader))
-        batch = BatchedDataDict(next_batch_data)
+        try:
+            next_batch_data = next(self.dataloader_iter)
+        except StopIteration:
+            self.dataloader_iter = iter(self.dataloader)
+            next_batch_data = next(self.dataloader_iter)
 
         # Convert batch to messages
+        batch = BatchedDataDict(next_batch_data)
         messages = self.BatchedDataDict2Messages(batch)
 
         # Add messages to job queue with priority based on data_index

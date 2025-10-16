@@ -19,6 +19,7 @@ from typing import Optional
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import OmegaConf
+from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
@@ -107,6 +108,7 @@ def setup_env(
     master_config: MasterConfig,
     policy_generation: VllmGeneration,
     tokenizer: PreTrainedTokenizerBase,
+    dataloader: StatefulDataLoader,
 ):
     dp_size = policy_generation.dp_size
     server_urls = policy_generation.server_urls
@@ -116,6 +118,7 @@ def setup_env(
         tokenizer=tokenizer,
         server_addresses=server_urls,
         dp_size=dp_size,
+        dataloader=dataloader,
     )
 
     return env
@@ -186,10 +189,8 @@ def main() -> None:
         config,
         policy_generation,
         tokenizer,
+        dataloader,
     )
-
-    # Set the dataloader for DAPO streaming
-    env.data_loader = dataloader
 
     grpo_train(
         policy,
