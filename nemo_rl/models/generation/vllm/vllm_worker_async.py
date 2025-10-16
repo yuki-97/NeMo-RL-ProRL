@@ -15,6 +15,7 @@
 import asyncio
 import gc
 import threading
+import time
 import uuid
 from typing import Any, AsyncGenerator, Optional, cast
 
@@ -137,6 +138,8 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         self.llm_async_engine_args = AsyncEngineArgs(**llm_kwargs)
         self.llm = AsyncLLM.from_engine_args(self.llm_async_engine_args)
+        self.request_ids = set()
+        self.block_requests = False
 
         self.server_thread, self.base_url, self.http_server = None, None, None
         if self.cfg["vllm_cfg"].get("expose_http_server", None):
@@ -525,9 +528,12 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 max_new_tokens=allowed_new_tokens,
             )
 
-            request_id = str(uuid.uuid4())
+            if self.block_requests:
+                raise RuntimeError("Requests are blocked since engine is sleeping.")
 
             # Generate using vLLM async engine
+            request_id = str(uuid.uuid4())
+            self.request_ids.add(request_id)
             vllm_request_generator = self.llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params_for_request,
@@ -536,8 +542,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
             # Get the final result from the generator
             final_request_output = None
-            async for req_output in vllm_request_generator:
-                final_request_output = req_output
+            try:
+                async for req_output in vllm_request_generator:
+                    final_request_output = req_output
+            except asyncio.CancelledError as e:
+                raise e
+            finally:
+                self.request_ids.remove(request_id)
 
             if final_request_output is None:
                 raise RuntimeError(f"No output received for request {request_id}")
@@ -765,8 +776,11 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         # Generate result
         async_generator = self.generate_async(data, max_new_tokens=max_new_tokens)
-        async for _, result in async_generator:
-            pass
+        try:
+            async for _, result in async_generator:
+                pass
+        except Exception:
+            return {"status_code": 499}
 
         # Convert result to dict
         output_ids = result["output_ids"][0][input_lengths:]
@@ -913,6 +927,14 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 "sleep_async can only be used with async_engine=True. Use sleep instead."
             )
 
+        # Abort all remaining requests
+        self.block_requests = True
+        time.sleep(0.1)  # wait for all requests to be added to the request_ids set
+        request_ids = list(self.request_ids)
+        abort_tasks = [asyncio.create_task(self.llm.abort(i)) for i in request_ids]
+        await asyncio.gather(*abort_tasks, return_exceptions=True)
+        self.request_ids.clear()
+
         # Reset the prefix cache to ensure that prefix cache is not reused after weights are updated
         await self.llm.reset_prefix_cache()
         await self.llm.sleep(level=1)
@@ -938,6 +960,8 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             wake_up_args["tags"] = tags
 
         await self.llm.wake_up(**wake_up_args)
+
+        self.block_requests = False
 
     def shutdown(self) -> bool:
         """Clean up vLLM resources."""
