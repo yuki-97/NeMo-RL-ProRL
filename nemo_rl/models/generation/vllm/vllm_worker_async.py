@@ -137,6 +137,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         self.llm_async_engine_args = AsyncEngineArgs(**llm_kwargs)
         self.llm = AsyncLLM.from_engine_args(self.llm_async_engine_args)
+        self.request_ids = set()
 
         self.server_thread, self.base_url, self.http_server = None, None, None
         if self.cfg["vllm_cfg"].get("expose_http_server", None):
@@ -533,11 +534,17 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 sampling_params=sampling_params_for_request,
                 request_id=request_id,
             )
+            self.request_ids.add(request_id)
 
             # Get the final result from the generator
             final_request_output = None
-            async for req_output in vllm_request_generator:
-                final_request_output = req_output
+            try:
+                async for req_output in vllm_request_generator:
+                    final_request_output = req_output
+            except asyncio.CancelledError as e:
+                raise e
+            finally:
+                self.request_ids.remove(request_id)
 
             if final_request_output is None:
                 raise RuntimeError(f"No output received for request {request_id}")
@@ -765,8 +772,11 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
         # Generate result
         async_generator = self.generate_async(data, max_new_tokens=max_new_tokens)
-        async for _, result in async_generator:
-            pass
+        try:
+            async for _, result in async_generator:
+                pass
+        except Exception:
+            return {"status_code": 499}
 
         # Convert result to dict
         output_ids = result["output_ids"][0][input_lengths:]
@@ -912,6 +922,12 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             raise RuntimeError(
                 "sleep_async can only be used with async_engine=True. Use sleep instead."
             )
+
+        # Abort all remaining requests
+        request_ids = list(self.request_ids)
+        abort_tasks = [asyncio.create_task(self.llm.abort(i)) for i in request_ids]
+        await asyncio.gather(*abort_tasks, return_exceptions=True)
+        self.request_ids.clear()
 
         # Reset the prefix cache to ensure that prefix cache is not reused after weights are updated
         await self.llm.reset_prefix_cache()
