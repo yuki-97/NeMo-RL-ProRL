@@ -431,7 +431,7 @@ class OpenhandsEnvironment:
 
         return new_messages
 
-    def Results2BatchedDataDict(self, results: dict) -> BatchedDataDict:
+    def Results2BatchedDataDict(self, results: dict, input_batch) -> BatchedDataDict:
         """Convert OpenHands conversation results to BatchedDataDict format for training.
 
         Args:
@@ -518,7 +518,7 @@ class OpenhandsEnvironment:
 
         # Create final results in the same order as the input batch
         # This ensures consistent ordering for training
-        for instance in self.batch["instance"]:
+        for instance in input_batch["instance"]:
             instance_id = instance["instance_id"]
 
             # Handle empty messages by copying from another trajectory of the same instance
@@ -689,9 +689,6 @@ class OpenhandsEnvironment:
         # Start total timing for performance analysis
         total_start_time = time.time()
 
-        # Store batch reference for result processing
-        self.batch = batch
-
         # Time message conversion phase
         convert_start_time = time.time()
         messages = self.BatchedDataDict2Messages(batch)
@@ -712,7 +709,7 @@ class OpenhandsEnvironment:
 
         # Time result conversion phase
         convert_results_start_time = time.time()
-        response = self.Results2BatchedDataDict(output_messages)
+        response = self.Results2BatchedDataDict(output_messages, batch)
         rollout_metrics = self.calculate_metrics(response)
         convert_results_end_time = time.time()
         total_end_time = time.time()
