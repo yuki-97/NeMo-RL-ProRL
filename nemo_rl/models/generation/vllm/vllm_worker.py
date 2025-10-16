@@ -289,6 +289,23 @@ class BaseVllmGenerationWorker:
 
             _patch_vllm_sampler()
 
+            def _patch_asyncio_set():
+                import asyncio
+
+                def _safe_event_set(self):
+                    """This is a workaround to avoid crashing when high concurrency."""
+                    if not self._value:
+                        self._value = True
+
+                        waiters = list(self._waiters)
+                        for fut in waiters:
+                            if not fut.done():
+                                fut.set_result(True)
+
+                asyncio.Event.set = _safe_event_set
+
+            _patch_asyncio_set()
+
         except (ImportError, AttributeError):
             # vllm not installed or has a different structure, skipping patch.
             pass
