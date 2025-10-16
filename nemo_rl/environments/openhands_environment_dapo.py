@@ -65,7 +65,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
         # Time OpenHands request processing phase
         request_start_time = time.time()
-        output_messages, output_batch = asyncio.run(
+        output_messages, input_batch = asyncio.run(
             self.request_from_openhands_dapo(requested_batch_size)
         )
         request_end_time = time.time()
@@ -76,7 +76,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
         # Time result conversion phase
         convert_results_start_time = time.time()
-        response = self.Results2BatchedDataDict(output_messages)
+        response = self.Results2BatchedDataDict(output_messages, input_batch)
         rollout_metrics = self.calculate_metrics(response)
         convert_results_end_time = time.time()
         total_end_time = time.time()
