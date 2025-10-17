@@ -568,6 +568,9 @@ class OpenhandsEnvironment:
                 )
                 # TODO: check
                 result_dict["loss_multiplier"].append(1.0)
+                # data source
+                result_dict["data_source"].append(instance["data_source"])
+                result_dict["extra_info"].append(instance["extra_info"])
 
         # concat prompt/response ids
         def concat_ids(ids_list: list[torch.Tensor], pad_side: str) -> torch.Tensor:

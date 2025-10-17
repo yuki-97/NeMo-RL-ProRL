@@ -15,6 +15,7 @@ import gc
 import os
 import time
 import warnings
+from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, NotRequired, Optional, TypedDict, TypeVar, cast
@@ -925,7 +926,7 @@ def grpo_train(
                 grpo_save_state["current_epoch"] = current_epoch
                 grpo_save_state["total_valid_tokens"] = total_valid_tokens
                 if val_metrics is not None:
-                    grpo_save_state["val_reward"] = val_metrics["accuracy"]
+                    grpo_save_state["val_reward"] = val_metrics["accuracy-total"]
                 elif "val_reward" in grpo_save_state:
                     del grpo_save_state["val_reward"]
                 grpo_save_state["consumed_samples"] = consumed_samples
@@ -1062,7 +1063,7 @@ def validate(
     with timer.time("total_validation_time"):
         print(f"▶ Starting validation at step {step}...", flush=True)
 
-        total_rewards = []
+        total_rewards = defaultdict(list)
         total_lengths = []
         all_message_logs = []  # Collect all message logs
 
@@ -1099,9 +1100,26 @@ def validate(
                     max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
                     greedy=False,
                 )
-            rewards = val_batch["total_reward"]
 
-            total_rewards.extend(rewards.tolist())
+            # Get data source of the validation batch
+            data_source_list = val_batch["data_source"]
+            extra_info_list = val_batch["extra_info"]
+            for idx in range(len(data_source_list)):
+                if "name" in extra_info_list[idx]:
+                    data_source = extra_info_list[idx]["name"]
+                    data_source_list[idx] = data_source
+
+            data_source_idx_dict = defaultdict(list)
+            for idx, ds in enumerate(data_source_list):
+                data_source_idx_dict[ds].append(idx)
+
+            # Collect rewards for each data source
+            rewards = val_batch["total_reward"]
+            total_rewards["total"].extend(rewards.tolist())
+            for ds, idx_list in data_source_idx_dict.items():
+                total_rewards[ds].extend(rewards[idx_list].tolist())
+
+            # Collect lengths
             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
 
             # Collect message logs for later display
@@ -1115,11 +1133,11 @@ def validate(
             all_message_logs.extend(to_env)
 
         # Calculate validation metrics
-        accuracy = sum(total_rewards) / len(total_rewards)
+        accuracy = {ds: sum(total_rewards[ds]) / len(total_rewards[ds]) for ds in total_rewards}
         avg_length = sum(total_lengths) / len(total_lengths)
 
         val_metrics = {
-            "accuracy": accuracy,
+            **{f"accuracy-{ds}": accuracy[ds] for ds in accuracy},
             "avg_length": avg_length,
         }
 
@@ -1144,7 +1162,7 @@ def validate(
 
     # Print summary of validation results
     print("\n📊 Validation Results:")
-    print(f"    • Accuracy: {accuracy:.4f}")
+    print(f"    • Accuracy (total): {accuracy['total']:.4f}")
     print(f"    • Average response length: {avg_length:.1f} tokens")
     print(f"    • Samples processed: {len(total_rewards)}", flush=True)
 
@@ -1705,7 +1723,7 @@ def async_grpo_train(
                     grpo_save_state["current_step"] = step + 1
                     grpo_save_state["total_valid_tokens"] = total_valid_tokens
                     if val_metrics is not None:
-                        grpo_save_state["val_reward"] = val_metrics["accuracy"]
+                        grpo_save_state["val_reward"] = val_metrics["accuracy-total"]
                     elif "val_reward" in grpo_save_state:
                         del grpo_save_state["val_reward"]
                     grpo_save_state["consumed_samples"] = consumed_samples
