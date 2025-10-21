@@ -232,6 +232,7 @@ for i in "${!nodes_array[@]}"; do
         bash -c "cd $OPENHANDS_DIR \
             && export PYTHONPATH=$OPENHANDS_DIR \
             && export OH_RUNTIME_SINGULARITY_IMAGE_REPO=$OH_RUNTIME_SINGULARITY_IMAGE_REPO \
+            && export PRORL_TOKENIZER=$PRORL_TOKENIZER \
             && export LOG_LEVEL=ERROR \
             && export DEBUG=False \
             && nohup python scripts/start_server.py --max-init-workers ${OPENHANDS_SERVER_INIT_WORKERS} --max-run-workers ${OPENHANDS_SERVER_RUN_WORKERS} --max-eval-workers ${OPENHANDS_SERVER_INIT_WORKERS} --timeout ${OPENHANDS_TIMEOUT} --reward-server-ip localhost --use-thread-based-server" &
