@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from copy import deepcopy
 from typing import Dict, List, Tuple
 
 import aiohttp
@@ -85,6 +86,9 @@ class OpenhandsEnvironment:
         # Extract generation and processing parameters
         # Number of trajectories per prompt
         self.num_trajectories = self.full_config["grpo"]["num_generations_per_prompt"]
+        self.val_num_trajectories = self.full_config["grpo"][
+            "val_num_generations_per_prompt"
+        ]
         # Token filtering
         # Not supported and not used yet
         # self.remove_think_tokens = False
@@ -134,6 +138,12 @@ class OpenhandsEnvironment:
             "strict_loop_detector": self.config.get("strict_loop_detector", True),
             "is_reasoning_task": self.config.get("is_reasoning_task", False),
         }
+        self.val_sampling_params = deepcopy(self.sampling_params)
+        self.val_sampling_params["temperature"] = self.config["val_sampling_cfg"][
+            "temperature"
+        ]
+        self.val_sampling_params["top_p"] = self.config["val_sampling_cfg"]["top_p"]
+
         # Parse and validate OpenHands server addresses
         # OpenHands servers handle multi-turn conversations with tool usage
         openhands_base_urls = os.environ.get("OPENHANDS_URLS", None)
@@ -395,7 +405,9 @@ class OpenhandsEnvironment:
     # ===============================================================================
     # Formatting & Rollout
     # ===============================================================================
-    def BatchedDataDict2Messages(self, prompts: BatchedDataDict) -> list[dict]:
+    def BatchedDataDict2Messages(
+        self, prompts: BatchedDataDict, is_val: bool = False
+    ) -> list[dict]:
         """Convert BatchedDataDict input to OpenHands message format.
 
         This method transforms the structured BatchedDataDict input into the message format
@@ -407,6 +419,7 @@ class OpenhandsEnvironment:
                 Each instance typically contains:
                 - instance_id: Unique identifier for the problem instance
                 - Problem description, context, and other metadata
+            is_val (bool): Whether the rollout is for validation
 
         Returns:
             list: List of message dictionaries formatted for OpenHands processing
@@ -423,8 +436,11 @@ class OpenhandsEnvironment:
 
         # Expand each instance into multiple trajectories
         new_messages = []
+        num_trajectories = (
+            self.val_num_trajectories if is_val else self.num_trajectories
+        )
         for i in range(len(messages)):
-            for j in range(self.num_trajectories):
+            for j in range(num_trajectories):
                 # Create a copy of the original message for each trajectory
                 tmp_message = messages[i].copy()
                 tmp_message["trajectory_id"] = j  # Add trajectory identifier
@@ -658,7 +674,9 @@ class OpenhandsEnvironment:
 
         return rollout_metrics
 
-    def run_async_rollout(self, batch: BatchedDataDict) -> tuple[BatchedDataDict, dict]:
+    def run_async_rollout(
+        self, batch: BatchedDataDict, is_val: bool = False
+    ) -> tuple[BatchedDataDict, dict]:
         """Generate multiple conversation sequences in parallel via OpenHands servers.
 
         This is the main entry point for conversation generation. It orchestrates
@@ -679,8 +697,8 @@ class OpenhandsEnvironment:
            - Includes timing information and metadata
 
         Args:
-            prompts (BatchedDataDict): Input batch containing problem instances
-            **sampling_params: Additional parameters for generation (currently unused)
+            batch (BatchedDataDict): Input batch containing problem instances
+            is_val (bool): Whether the rollout is for validation
 
         Returns:
             BatchedDataDict: Generated conversation sequences with:
@@ -696,7 +714,7 @@ class OpenhandsEnvironment:
 
         # Time message conversion phase
         convert_start_time = time.time()
-        messages = self.BatchedDataDict2Messages(batch)
+        messages = self.BatchedDataDict2Messages(batch, is_val=is_val)
         convert_end_time = time.time()
 
         logger.info(
@@ -705,7 +723,9 @@ class OpenhandsEnvironment:
 
         # Time OpenHands request processing phase
         request_start_time = time.time()
-        output_messages = asyncio.run(self.request_from_openhands(messages))
+        output_messages = asyncio.run(
+            self.request_from_openhands(messages, is_val=is_val)
+        )
         request_end_time = time.time()
 
         logger.info(
@@ -984,7 +1004,7 @@ class OpenhandsEnvironment:
             logger.error(f"Error stopping OpenHands server {openhands_base_url}: {e}")
             raise
 
-    async def request_from_openhands(self, messages: List):
+    async def request_from_openhands(self, messages: List, is_val: bool = False):
         """Process conversation requests using OpenHands servers with intelligent load balancing.
 
         This method implements a sophisticated request distribution system that:
@@ -1012,6 +1032,7 @@ class OpenhandsEnvironment:
         Args:
             messages (List): List of message dictionaries to process
                 Each message contains instance data and trajectory information
+            is_val (bool): Whether the rollout is for validation
 
         Returns:
             dict: Mapping of instance_id to trajectory results
@@ -1133,6 +1154,7 @@ class OpenhandsEnvironment:
                         message=message,
                         message_index=message_index,
                         openhands_base_url=server_url,
+                        is_val=is_val,
                     )
 
                     # Handle retry logic
@@ -1256,7 +1278,11 @@ class OpenhandsEnvironment:
             logger.info(f"Server shutdown took: {stop_end_time - stop_start_time:.2f}s")
 
     async def _send_single_message_to_openhands(
-        self, message: dict, message_index: int, openhands_base_url: str
+        self,
+        message: dict,
+        message_index: int,
+        openhands_base_url: str,
+        is_val: bool = False,
     ):
         """Send single message to openhands server.
 
@@ -1269,6 +1295,7 @@ class OpenhandsEnvironment:
                 to be processed by OpenHands.
             message_index (int): The index of the message in the input batch.
             openhands_base_url (str): The base URL of the OpenHands server.
+            is_val (bool): Whether the rollout is for validation
 
         Returns:
             tuple: A tuple (result, should_retry) where:
@@ -1278,7 +1305,9 @@ class OpenhandsEnvironment:
         try:
             request_data = {
                 "instance": message,
-                "sampling_params": self.sampling_params,
+                "sampling_params": self.val_sampling_params
+                if is_val
+                else self.sampling_params,
             }
 
             timeout = aiohttp.ClientTimeout(total=None)
