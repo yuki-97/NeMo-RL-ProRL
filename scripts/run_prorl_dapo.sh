@@ -13,7 +13,12 @@ export VERL_DIR=
 . init_docker.sh
 
 PROJECT_NAME=prorl-yukih
-EXP_NAME=nemorl-rf++-baseline-dapo-no-shuffle-1017
+# 1017: baseline
+# 1018: fix tokenizer
+# 1019: fix special token, length, think
+EXP_NAME=nemorl-rf++-baseline-dapo-1019
+
+MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill-Qwen-1.5B"
 
 NUM_ACTOR_NODES=4
 NUM_ACTOR_GPUS=8
@@ -57,7 +62,7 @@ uv run python examples/run_grpo_openhands.py \
     loss_fn.reference_policy_kl_type=k2 \
     loss_fn.use_importance_sampling_correction=true \
     loss_fn.truncated_importance_sampling_ratio=2 \
-    policy.model_name=/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill-Qwen-1.5B \
+    policy.model_name=${MODEL_NAME} \
     policy.max_total_sequence_length=9216 \
     policy.train_global_batch_size=1024 \
     policy.train_micro_batch_size=1 \
@@ -78,7 +83,7 @@ uv run python examples/run_grpo_openhands.py \
     ++data.train_data_path=${TRAIN_DATA} \
     ++data.val_data_path=${VAL_DATA} \
     ++data.use_raw_data=true \
-    data.shuffle=false \
+    data.shuffle=true \
     ++env.do_rollout_in_env=true \
     checkpointing.checkpoint_dir=results/${EXP_NAME} \
     checkpointing.higher_is_better=false \
@@ -99,6 +104,7 @@ OPENHANDS_DIR=${OPENHANDS_DIR} \
 OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
 OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
 OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
+MODEL_NAME=${MODEL_NAME} \
 MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
 sbatch \
     --account=nvr_lpr_agentic \

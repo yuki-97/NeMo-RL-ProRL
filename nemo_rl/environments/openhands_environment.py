@@ -95,7 +95,7 @@ class OpenhandsEnvironment:
         self.max_prompt_length = self.config["max_prompt_length"]
         self.max_response_length = self.config["max_response_length"]
         self.total_len = self.config["vllm_cfg"]["max_model_len"]
-        assert self.max_prompt_length + self.max_response_length <= self.total_len
+        assert self.max_prompt_length + self.max_response_length == self.total_len
         # TODO: check
         self.max_starting_message_length = None
 
