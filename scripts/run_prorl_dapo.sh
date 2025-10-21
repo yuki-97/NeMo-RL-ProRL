@@ -89,7 +89,7 @@ uv run python examples/run_grpo_openhands.py \
     data.shuffle=true \
     ++env.do_rollout_in_env=true \
     checkpointing.checkpoint_dir=results/${EXP_NAME} \
-    checkpointing.higher_is_better=false \
+    checkpointing.keep_top_k=5 \
     checkpointing.save_period=5 \
     logger.wandb_enabled=true \
     logger.tensorboard_enabled=false \
