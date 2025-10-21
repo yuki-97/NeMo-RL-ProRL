@@ -422,6 +422,9 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         data: BatchedDataDict[GenerationDatumSpec],
         greedy: bool = False,
         max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> AsyncGenerator[tuple[int, BatchedDataDict[GenerationOutputSpec]], None]:
         """Generate a batch of data using vLLM's AsyncLLMEngine, yielding results as they are ready.
 
@@ -524,6 +527,9 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 greedy=greedy,
                 stop_strings=final_stop_strings_for_sample,
                 max_new_tokens=allowed_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
             )
 
             request_id = str(uuid.uuid4())
@@ -754,9 +760,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         """Generate responses asynchronously for HTTP request."""
         # Get data from request
         input_ids = request["prompt_ids"]
-        # TODO: check the logic of length parameters
         max_new_tokens = request["max_tokens"]
-        # TODO: not used for now, need check later
         temperature = request["temperature"]
         top_p = request["top_p"]
         # seed = request["seed"]
@@ -771,7 +775,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         )
 
         # Generate result
-        async_generator = self.generate_async(data, max_new_tokens=max_new_tokens)
+        async_generator = self.generate_async(
+            data,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
         try:
             async for _, result in async_generator:
                 pass

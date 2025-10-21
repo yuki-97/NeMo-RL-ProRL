@@ -446,12 +446,18 @@ class BaseVllmGenerationWorker:
         *,
         greedy: bool,
         stop_strings,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
         max_new_tokens: Optional[int] = None,
     ):
-        top_k_cfg = self.cfg["top_k"]
-        top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
+        temperature = temperature if temperature is not None else self.cfg["temperature"]
+        top_p = top_p if top_p is not None else self.cfg["top_p"]
+        top_k = top_k if top_k is not None else self.cfg["top_k"]
 
-        temperature = 0.0 if greedy else self.cfg["temperature"]
+        if greedy:
+            temperature = 0.0
+            top_k = 1
 
         max_tokens = (
             max_new_tokens if max_new_tokens is not None else self.cfg["max_new_tokens"]
@@ -459,8 +465,8 @@ class BaseVllmGenerationWorker:
 
         return self.SamplingParams(
             temperature=temperature,
-            top_p=self.cfg["top_p"],
-            top_k=top_k_val,
+            top_p=top_p,
+            top_k=top_k,
             max_tokens=max_tokens,
             logprobs=0,
             stop_token_ids=self.cfg["stop_token_ids"],

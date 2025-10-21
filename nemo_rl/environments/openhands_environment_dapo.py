@@ -115,7 +115,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
         # Convert batch to messages
         batch = BatchedDataDict(next_batch_data)
-        messages = self.BatchedDataDict2Messages(batch)
+        messages = self.BatchedDataDict2Messages(batch, is_val=False)
 
         # Add messages to job queue with priority based on data_index
         for message in messages:
@@ -293,6 +293,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
                         message=message,
                         message_index=message_index,
                         openhands_base_url=server_url,
+                        is_val=False,  # DAPO is only used for training
                     )
 
                     # Handle retry logic
@@ -549,7 +550,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
     async def push_remaining_train_data_to_job_queue(self):
         """Push the remaining train data back to the job queue."""
         self.last_data_index = 0
-        messages = self.BatchedDataDict2Messages(self.all_input_batch)
+        messages = self.BatchedDataDict2Messages(self.all_input_batch, is_val=False)
         for message in messages:
             await self.job_queue.put(
                 (self.last_data_index, (self.last_data_index, message, 0))

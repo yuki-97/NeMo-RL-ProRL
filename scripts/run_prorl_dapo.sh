@@ -16,16 +16,17 @@ PROJECT_NAME=prorl-yukih
 # 1017: baseline
 # 1018: fix tokenizer
 # 1019: fix special token, length, think
-EXP_NAME=nemorl-rf++-baseline-dapo-1019
+# 1021: fix reward
+EXP_NAME=nemorl-rf++-baseline-dapo-1021
 
 MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill-Qwen-1.5B"
 
 NUM_ACTOR_NODES=4
 NUM_ACTOR_GPUS=8
 
-OPENHANDS_SERVER_INIT_WORKERS=512
-OPENHANDS_SERVER_RUN_WORKERS=512
-OPENHANDS_NUM_WORKERS=512
+OPENHANDS_SERVER_INIT_WORKERS=1024
+OPENHANDS_SERVER_RUN_WORKERS=1024
+OPENHANDS_NUM_WORKERS=1024
 OPENHANDS_TIMEOUT=300
 
 # rf++
@@ -47,6 +48,7 @@ NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
     grpo.num_prompts_per_step=512 \
     grpo.num_generations_per_prompt=16 \
+    grpo.val_num_generations_per_prompt=4 \
     grpo.max_rollout_turns=1 \
     grpo.val_at_start=true \
     grpo.val_period=5 \
@@ -73,6 +75,7 @@ uv run python examples/run_grpo_openhands.py \
     ++policy.generation.is_reasoning_task=true \
     ++policy.generation.max_prompt_length=1024 \
     ++policy.generation.max_response_length=8192 \
+    policy.generation.val_sampling_cfg.temperature=0.6 \
     policy.generation.vllm_cfg.async_engine=true \
     ++policy.generation.vllm_cfg.expose_http_server=http \
     policy.generation.vllm_cfg.tensor_parallel_size=1 \

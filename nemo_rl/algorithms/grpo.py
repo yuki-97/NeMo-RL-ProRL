@@ -1078,7 +1078,7 @@ def validate(
             # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
             # Run rollouts in the environment
             if _should_use_rollout_in_env(master_config):
-                val_batch, gen_metrics = val_task_to_env.run_async_rollout(val_batch)
+                val_batch, gen_metrics = val_task_to_env.run_async_rollout(val_batch, is_val=True)
             # Use async rollouts if vLLM async engine is enabled
             elif _should_use_async_rollouts(master_config):
                 val_batch, gen_metrics = run_async_multi_turn_rollout(
