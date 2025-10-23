@@ -15,6 +15,7 @@
 import asyncio
 import gc
 import threading
+import time
 import uuid
 from typing import Any, AsyncGenerator, Optional, cast
 
@@ -138,6 +139,7 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         self.llm_async_engine_args = AsyncEngineArgs(**llm_kwargs)
         self.llm = AsyncLLM.from_engine_args(self.llm_async_engine_args)
         self.request_ids = set()
+        self.block_requests = False
 
         self.server_thread, self.base_url, self.http_server = None, None, None
         if self.cfg["vllm_cfg"].get("expose_http_server", None):
@@ -532,15 +534,17 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 top_k=top_k,
             )
 
-            request_id = str(uuid.uuid4())
+            if self.block_requests:
+                raise RuntimeError("Requests are blocked since engine is sleeping.")
 
             # Generate using vLLM async engine
+            request_id = str(uuid.uuid4())
+            self.request_ids.add(request_id)
             vllm_request_generator = self.llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params_for_request,
                 request_id=request_id,
             )
-            self.request_ids.add(request_id)
 
             # Get the final result from the generator
             final_request_output = None
@@ -934,6 +938,8 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             )
 
         # Abort all remaining requests
+        self.block_requests = True
+        time.sleep(0.1)  # wait for all requests to be added to the request_ids set
         request_ids = list(self.request_ids)
         abort_tasks = [asyncio.create_task(self.llm.abort(i)) for i in request_ids]
         await asyncio.gather(*abort_tasks, return_exceptions=True)
@@ -964,6 +970,8 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             wake_up_args["tags"] = tags
 
         await self.llm.wake_up(**wake_up_args)
+
+        self.block_requests = False
 
     def shutdown(self) -> bool:
         """Clean up vLLM resources."""
