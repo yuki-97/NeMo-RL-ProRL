@@ -218,6 +218,8 @@ sleep 10s
 
 # ==================== Start OpenHands on all nodes ====================
 echo "Starting OpenHands servers on all nodes..."
+OPENHANDS_CONTAINER="/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh"
+OH_RUNTIME_SINGULARITY_IMAGE_REPO="/lustre/fs1/portfolios/llmservice/users/shaokunz/Openhands2/OpenHands_internal/singularity_images_v2"
 openhands_urls=""
 for i in "${!nodes_array[@]}"; do
     node=${nodes_array[$i]}
@@ -225,12 +227,12 @@ for i in "${!nodes_array[@]}"; do
 
     # Start OpenHands server on this node in background
     srun --overlap --nodes=1 --ntasks=1 -w $node \
-        --no-container-mount-home --container-image=$CONTAINER --container-mounts=$MOUNTS \
+        --no-container-mount-home --container-image=$OPENHANDS_CONTAINER --container-mounts=$MOUNTS \
         -o $LOG_DIR/openhands-worker-$i.out -e $LOG_DIR/openhands-worker-$i.err \
         bash -c "cd $OPENHANDS_DIR \
             && export PYTHONPATH=$OPENHANDS_DIR \
             && export OH_RUNTIME_SINGULARITY_IMAGE_REPO=$OH_RUNTIME_SINGULARITY_IMAGE_REPO \
-            && export PRORL_TOKENIZER=$MODEL_NAME \
+            && export PRORL_TOKENIZER=$PRORL_TOKENIZER \
             && export LOG_LEVEL=ERROR \
             && export DEBUG=False \
             && nohup python scripts/start_server.py --max-init-workers ${OPENHANDS_SERVER_INIT_WORKERS} --max-run-workers ${OPENHANDS_SERVER_RUN_WORKERS} --max-eval-workers ${OPENHANDS_SERVER_INIT_WORKERS} --timeout ${OPENHANDS_TIMEOUT} --reward-server-ip localhost --use-thread-based-server" &
@@ -315,7 +317,6 @@ log-sync-sidecar &
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 
 cat <<EOFINNER | tee /launch-head.sh
-pip install uv
 ray start --head \
     --disable-usage-stats \
     --resources="{\"worker_units\": $GPUS_PER_NODE, \"slurm_managed_ray_cluster\": 1}" \
@@ -417,7 +418,6 @@ log-sync-sidecar &
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 
 cat <<EOFINNER | tee /launch-worker.sh
-pip install uv
 ray start --address "$ip_head" \
           --disable-usage-stats \
           --resources="{\"worker_units\": $GPUS_PER_NODE, \"slurm_managed_ray_cluster\": 1}" \

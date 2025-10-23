@@ -1,12 +1,10 @@
 #!/bin/bash
 
 # environment variables (set to your own)
-export UV_CACHE_DIR=
 export WANDB_API_KEY=
 export HF_TOKEN=
 export HF_HOME=
 export HF_DATASETS_CACHE=
-export NEMORL_DIR=
 export OPENHANDS_DIR=
 # tmp for sandbox
 export VERL_DIR=
@@ -24,10 +22,10 @@ MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill
 NUM_ACTOR_NODES=4
 NUM_ACTOR_GPUS=8
 
-OPENHANDS_SERVER_INIT_WORKERS=1024
-OPENHANDS_SERVER_RUN_WORKERS=1024
-OPENHANDS_NUM_WORKERS=1024
-OPENHANDS_TIMEOUT=300
+export OPENHANDS_SERVER_INIT_WORKERS=1024
+export OPENHANDS_SERVER_RUN_WORKERS=1024
+export OPENHANDS_NUM_WORKERS=1024
+export OPENHANDS_TIMEOUT=300
 
 # rf++
 # grpo.estimator.name=reinforce_plus_plus \
@@ -42,9 +40,7 @@ TRAIN_DATA="['$HOME_DIR2/data/deepscaler/train.parquet','$HOME_DIR2/data/eurus2-
 VAL_DATA="['$HOME_DIR2/data/validation/aime_codeforces_gpqa_reasoning.parquet','$HOME_DIR/data/training_data/ifeval/if_eval_google.parquet']"
 
 # run command
-RUN_COMMAND="UV_CACHE_DIR=${UV_CACHE_DIR} HF_HOME=${HF_HOME} HF_DATASETS_CACHE=${HF_DATASETS_CACHE} WANDB_API_KEY=${WANDB_API_KEY} \
-UV_PROJECT_ENVIRONMENT=${NEMORL_DIR}/.venv NEMO_RL_VENV_DIR=${NEMORL_DIR}/venvs \
-NRL_FORCE_REBUILD_VENVS=true HF_HUB_ENABLE_HF_TRANSFER=0 \
+RUN_COMMAND="NRL_FORCE_REBUILD_VENVS=true \
 uv run python examples/run_grpo_openhands.py \
     grpo.num_prompts_per_step=512 \
     grpo.num_generations_per_prompt=16 \
@@ -101,13 +97,8 @@ uv run python examples/run_grpo_openhands.py \
 
 # launch job
 COMMAND=${RUN_COMMAND} \
-CONTAINER=/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh \
-OH_RUNTIME_SINGULARITY_IMAGE_REPO=/lustre/fs1/portfolios/llmservice/users/shaokunz/Openhands2/OpenHands_internal/singularity_images_v2 \
-OPENHANDS_DIR=${OPENHANDS_DIR} \
-OPENHANDS_SERVER_INIT_WORKERS=${OPENHANDS_SERVER_INIT_WORKERS} \
-OPENHANDS_SERVER_RUN_WORKERS=${OPENHANDS_SERVER_RUN_WORKERS} \
-OPENHANDS_TIMEOUT=${OPENHANDS_TIMEOUT} \
-MODEL_NAME=${MODEL_NAME} \
+CONTAINER=/lustre/fsw/portfolios/nvr/users/yukih/enroot-images/nemo-rl:main-c249efc8.squashfs \
+PRORL_TOKENIZER=${MODEL_NAME} \
 MOUNTS="/lustre:/lustre:ro,$PWD:$PWD" \
 sbatch \
     --account=nvr_lpr_agentic \
