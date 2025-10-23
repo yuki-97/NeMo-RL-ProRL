@@ -1,0 +1,22 @@
+# Reinforce++ Algorithm Configuration
+defaults: "grpo_math_1B.yaml"
+
+grpo:
+  estimator:
+    name: "reinforce_plus_plus"
+  reward:
+    - name: "stop_properly_penalty"
+      penalty_coef: 0.1
+
+policy:
+  scheduler:
+    - name: "torch.optim.lr_scheduler.ConstantLR"
+      kwargs:
+        factor: 1.0
+        total_iters: 10000000000
+    - milestones: []
+
+  generation:
+    vllm_kwargs:
+      max_num_batched_tokens: 8192
+      max_num_seqs: 1024
