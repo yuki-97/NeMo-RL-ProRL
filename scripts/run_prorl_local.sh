@@ -18,12 +18,6 @@ TRAIN_DATA="['$HOME_DIR2/data/deepscaler/train.parquet','$HOME_DIR2/data/eurus2-
 # Val: full AIME, codeforces, gpqa, graph_color from reasoning_gym
 VAL_DATA="['$HOME_DIR2/data/validation/aime_codeforces_gpqa_reasoning.parquet','$HOME_DIR/data/training_data/ifeval/if_eval_google.parquet']"
 
-# rf++
-# grpo.estimator.name=reinforce_plus_plus \
-# grpo.estimator.minus_baseline=true \
-# loss_fn.use_kl_in_reward=false \
-
-HF_HUB_ENABLE_HF_TRANSFER=0 \
 uv run python examples/run_grpo_openhands.py \
     grpo.num_prompts_per_step=16 \
     grpo.num_generations_per_prompt=16 \

@@ -11,11 +11,7 @@ export VERL_DIR=
 . init_docker.sh
 
 PROJECT_NAME=prorl-yukih
-# 1017: baseline
-# 1018: fix tokenizer
-# 1019: fix special token, length, think
-# 1021: fix reward
-EXP_NAME=nemorl-rf++-baseline-dapo-1021
+EXP_NAME=nemorl-rf++-baseline-dapo
 
 MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill-Qwen-1.5B"
 
@@ -26,11 +22,6 @@ export OPENHANDS_SERVER_INIT_WORKERS=1024
 export OPENHANDS_SERVER_RUN_WORKERS=1024
 export OPENHANDS_NUM_WORKERS=1024
 export OPENHANDS_TIMEOUT=300
-
-# rf++
-# grpo.estimator.name=reinforce_plus_plus \
-# grpo.estimator.minus_baseline=true \
-# loss_fn.use_kl_in_reward=false \
 
 HOME_DIR="/lustre/fsw/portfolios/nvr/users/jianh"
 HOME_DIR2="/lustre/fsw/portfolios/nvr/users/mingjiel"
@@ -49,7 +40,7 @@ uv run python examples/run_grpo_openhands.py \
     grpo.val_at_start=true \
     grpo.val_period=5 \
     grpo.max_val_samples=1000000 \
-    grpo.val_batch_size=512 \
+    grpo.val_batch_size=1024 \
     grpo.estimator.name=reinforce_plus_plus \
     grpo.estimator.minus_baseline=true \
     grpo.estimator.advantage_boost_value=0.1 \
