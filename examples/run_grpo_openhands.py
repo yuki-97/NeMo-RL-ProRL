@@ -19,13 +19,13 @@ from typing import Optional
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 from omegaconf import OmegaConf
+from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
 from nemo_rl.distributed.virtual_cluster import init_ray
-from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.vllm import VllmGeneration
 from nemo_rl.utils.config import load_config, parse_hydra_overrides
@@ -107,16 +107,32 @@ def setup_env(
     master_config: MasterConfig,
     policy_generation: VllmGeneration,
     tokenizer: PreTrainedTokenizerBase,
+    dataloader: StatefulDataLoader,
 ):
     dp_size = policy_generation.dp_size
     server_urls = policy_generation.server_urls
 
-    env = OpenhandsEnvironment(
+    if master_config["env"].get("use_dapo", False):
+        from nemo_rl.environments.openhands_environment_dapo import (
+            OpenhandsEnvironmentDAPO,
+        )
+
+        env_cls = OpenhandsEnvironmentDAPO
+    else:
+        from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
+
+        env_cls = OpenhandsEnvironment
+
+    env = env_cls(
         config=master_config,
         tokenizer=tokenizer,
         server_addresses=server_urls,
         dp_size=dp_size,
     )
+
+    # Set the dataloader for DAPO streaming
+    if master_config["env"].get("use_dapo", False):
+        env.data_loader = dataloader
 
     return env
 
@@ -186,6 +202,7 @@ def main() -> None:
         config,
         policy_generation,
         tokenizer,
+        dataloader,
     )
 
     grpo_train(
