@@ -440,6 +440,7 @@ class OpenhandsEnvironment:
                 Each result_dict contains:
                 - messages: List of conversation messages, each message contains token ids.
                 - resolved: Boolean indicating if task was completed
+                - score: Float indicating the score of the trajectory
                 - success: Boolean indicating if execution succeeded
                 - error: Optional error message
                 - tools: Optional tool definitions
@@ -458,6 +459,7 @@ class OpenhandsEnvironment:
                 if messages and len(messages) > 0:
                     valid_messages = messages
                     valid_resolved = result.get("resolved", False)
+                    valid_score = result.get("score", 0.0)
                     valid_finish = result.get("finish", False)
                     valid_error = result.get("error", None)
                     break
@@ -473,6 +475,7 @@ class OpenhandsEnvironment:
                         # Copy messages from the valid trajectory
                         results[instance_id][idx]["messages"] = valid_messages.copy()
                         results[instance_id][idx]["resolved"] = valid_resolved
+                        results[instance_id][idx]["score"] = valid_score
                         results[instance_id][idx]["error"] = valid_error
                         results[instance_id][idx]["finish"] = valid_finish
                         # Mark as padded sample
@@ -541,7 +544,6 @@ class OpenhandsEnvironment:
                             )
                         message.pop("logprobs")
 
-                resolved = trajectory.get("resolved", False)
                 prompt_ids, response_ids = get_prompt_response_ids(messages)
 
                 # append to result_dict
@@ -555,14 +557,13 @@ class OpenhandsEnvironment:
                         "success": trajectory.get("success", False),
                         "error": trajectory.get("error", None),
                         # "instance": instance,
-                        "resolved": resolved,
+                        "resolved": trajectory.get("resolved", False),
                         "finish": trajectory.get("finish", False),
                         "is_padded": trajectory.get("is_padded", False),
                     }
                 )
                 result_dict["task_name"].append("openhands")
-                # TODO
-                result_dict["total_reward"].append(float(resolved))
+                result_dict["total_reward"].append(trajectory.get("score", 0.0))
                 # result_dict["idx"].append(trajectory["idx"])
                 result_dict["truncated"].append(
                     not trajectory.get("end_properly", False)
@@ -1189,8 +1190,9 @@ class OpenhandsEnvironment:
                     logger.error(f"Error processing message {message_index}: {result}")
                     all_responses[instance_id][trajectory_id] = {
                         "error": str(result),
-                        "success": False,
                         "messages": [],
+                        "score": 0.0,
+                        "success": False,
                         "resolved": False,
                         "finish": False,
                     }
@@ -1200,8 +1202,9 @@ class OpenhandsEnvironment:
                     logger.warning(f"Message {message_index} returned empty response")
                     all_responses[instance_id][trajectory_id] = {
                         "error": "Empty response",
-                        "success": False,
                         "messages": [],
+                        "score": 0.0,
+                        "success": False,
                         "resolved": False,
                         "finish": False,
                     }

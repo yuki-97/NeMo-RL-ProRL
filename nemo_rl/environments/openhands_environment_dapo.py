@@ -641,18 +641,25 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
         for instance_id in keys:
             if len(all_responses[instance_id]) == self.num_trajectories:
-                resolved_count = 0
-                for trajectory_id in all_responses[instance_id]:
-                    if all_responses[instance_id][trajectory_id]["resolved"]:
-                        resolved_count += 1
+                all_same = True
 
-                # Filter if all resolved or none resolved
-                if resolved_count == self.num_trajectories or resolved_count == 0:
+                # check if all trajectories have the same score
+                score = None
+                for trajectory_id in all_responses[instance_id]:
+                    trajectory = all_responses[instance_id][trajectory_id]
+                    trajectory_score = trajectory.get("score", 0)
+                    if score is None:
+                        score = trajectory_score
+                    elif score != trajectory_score:
+                        all_same = False
+                        break
+
+                # filter if all trajectories have the same score
+                if all_same:
                     all_responses.pop(instance_id)
                     filtered_instance_ids.append(instance_id)
                     logger.info(
-                        f"Filtered instance {instance_id} with resolved ratio "
-                        f"{resolved_count}/{self.num_trajectories}"
+                        f"Filtered instance {instance_id} with all same score {score}"
                     )
 
         return all_responses, filtered_instance_ids
