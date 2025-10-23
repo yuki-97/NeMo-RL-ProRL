@@ -54,6 +54,7 @@ class OpenhandsEnvironment:
         tokenizer: PreTrainedTokenizerBase,
         server_addresses: List[str],
         dp_size: int,
+        **kwargs,
     ):
         """Initialize OpenhandsEnvironment with configuration and worker group.
 

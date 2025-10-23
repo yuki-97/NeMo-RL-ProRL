@@ -128,11 +128,8 @@ def setup_env(
         tokenizer=tokenizer,
         server_addresses=server_urls,
         dp_size=dp_size,
+        dataloader=dataloader,
     )
-
-    # Set the dataloader for DAPO streaming
-    if master_config["env"].get("use_dapo", False):
-        env.data_loader = dataloader
 
     return env
 
