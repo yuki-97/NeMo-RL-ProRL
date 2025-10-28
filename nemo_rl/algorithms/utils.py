@@ -44,17 +44,18 @@ def calculate_kl_penalty(
     logprobs_reference: torch.Tensor (b, s)
     """
     logr = logprobs_reference - logprobs_policy
-    if clamp_value is not None:
-        logr = logr.clamp(min=-clamp_value, max=clamp_value)
 
     if kl_type == "k1":
         kl = -logr
 
     elif kl_type == "k2":
         kl = torch.square(logr) / 2
+        kl = torch.clamp(kl, min=-10, max=10)
 
     elif kl_type == "k3":
+        logr = logr.clamp(min=-20, max=20)
         kl = torch.exp(logr) - 1 - logr
+        kl = torch.clamp(kl, min=-10, max=10)
 
     else:
         raise ValueError(f"Invalid KL type: {kl_type}")

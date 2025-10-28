@@ -220,14 +220,10 @@ class ClippedPGLossFn(LossFunction):
                 )
             else:
                 kl_importance_weights = torch.ones_like(curr_logprobs)
-            kl = (
-                kl_importance_weights
-                * self.reference_policy_kl_penalty
-                * calculate_kl_penalty(
-                    logprobs_policy=curr_logprobs,
-                    logprobs_reference=reference_policy_logprobs,
-                    kl_type=self.reference_policy_kl_type,
-                )
+            kl = kl_importance_weights * calculate_kl_penalty(
+                logprobs_policy=curr_logprobs,
+                logprobs_reference=reference_policy_logprobs,
+                kl_type=self.reference_policy_kl_type,
             )
             if self.loss_type == LossType.TOKEN_LEVEL:
                 kl = masked_mean(
@@ -352,7 +348,7 @@ class ClippedPGLossFn(LossFunction):
                 global_normalization_factor=global_valid_toks,
             )
 
-        loss = actor_loss + kl
+        loss = actor_loss + kl * self.reference_policy_kl_penalty
         with torch.no_grad():
             probs_ratio = masked_mean(
                 ratios.detach(),
@@ -374,7 +370,7 @@ class ClippedPGLossFn(LossFunction):
                 "loss": loss.item(),
                 "probs_ratio": probs_ratio,
                 "probs_ratio_clamped": probs_ratio_clamped,
-                "kl_penalty": kl.item() / self.reference_policy_kl_penalty if kl else 0,
+                "kl_penalty": kl.item() if kl else 0,
                 "token_mult_prob_error": mult_prob_error,
                 "sampling_importance_ratio": sample_importance_ratio.item(),
                 "num_valid_samples": sample_mask.sum().item(),
