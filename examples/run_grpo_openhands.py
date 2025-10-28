@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import pickle
 import pprint
 from typing import Optional
 
@@ -108,11 +109,14 @@ def setup_env(
     policy_generation: VllmGeneration,
     tokenizer: PreTrainedTokenizerBase,
     dataloader: StatefulDataLoader,
+    last_checkpoint_path: str | None = None,
 ):
     dp_size = policy_generation.dp_size
     server_urls = policy_generation.server_urls
 
-    if master_config["env"].get("use_dapo", False):
+    env_use_dapo = master_config["env"].get("use_dapo", False)
+
+    if env_use_dapo:
         from nemo_rl.environments.openhands_environment_dapo import (
             OpenhandsEnvironmentDAPO,
         )
@@ -130,6 +134,20 @@ def setup_env(
         dp_size=dp_size,
         dataloader=dataloader,
     )
+
+    if env_use_dapo and last_checkpoint_path is not None:
+        remaining_train_data_path = os.path.join(
+            last_checkpoint_path, "remaining_train_data.pkl"
+        )
+        if os.path.exists(remaining_train_data_path):
+            with open(remaining_train_data_path, "rb") as f:
+                remaining_train_data = pickle.load(f)
+            env.all_input_batch = remaining_train_data
+            print(
+                f"Loaded {len(remaining_train_data['instance'])} remaining train data from checkpoint"
+            )
+        else:
+            print(f"No remaining train data found at {remaining_train_data_path}")
 
     return env
 
@@ -192,6 +210,7 @@ def main() -> None:
         checkpointer,
         grpo_state,
         master_config,
+        last_checkpoint_path,
     ) = setup(config, tokenizer, dataset, val_dataset)
 
     # setup environment
@@ -200,6 +219,7 @@ def main() -> None:
         policy_generation,
         tokenizer,
         dataloader,
+        last_checkpoint_path,
     )
 
     grpo_train(

@@ -50,6 +50,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         self.dataloader = dataloader
         self.dataloader_iter = iter(self.dataloader)
         self.all_input_batch = None  # Accumulated input batches
+        self.remaining_data_init = False
         self.last_data_index = 0  # Track position in data stream
         self.job_queue = asyncio.PriorityQueue()  # Priority queue for job scheduling
 
@@ -140,6 +141,11 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         Returns:
             tuple: (all_responses dict, output_batch BatchedDataDict)
         """
+        if not self.remaining_data_init:
+            await self.push_remaining_train_data_to_job_queue()
+            print("Pushed remaining at init")
+            self.remaining_data_init = True
+
         # Start total timing for performance analysis
         total_start_time = time.time()
 
@@ -550,6 +556,12 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
     async def push_remaining_train_data_to_job_queue(self):
         """Push the remaining train data back to the job queue."""
         self.last_data_index = 0
+        if self.all_input_batch is None:
+            return
+
+        print(
+            f"{len(self.all_input_batch['instance'])} remaining train data to push to job queue"
+        )
         messages = self.BatchedDataDict2Messages(self.all_input_batch, is_val=False)
         for message in messages:
             await self.job_queue.put(

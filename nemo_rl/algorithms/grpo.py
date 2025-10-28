@@ -13,6 +13,7 @@
 # limitations under the License.
 import gc
 import os
+import pickle
 import time
 import warnings
 from collections import defaultdict
@@ -475,6 +476,7 @@ def setup(
         checkpointer,
         grpo_save_state,
         master_config,
+        last_checkpoint_path,
     )
 
 
@@ -1009,6 +1011,12 @@ def grpo_train(
                         dataloader.state_dict(),
                         os.path.join(checkpoint_path, "train_dataloader.pt"),
                     )
+                    if use_env_dapo:
+                        remain_data_path = os.path.join(
+                            checkpoint_path, "remaining_train_data.pkl"
+                        )
+                        with open(remain_data_path, "wb") as f:
+                            pickle.dump(task_to_env.all_input_batch, f)
                     checkpointer.finalize_checkpoint(checkpoint_path)
 
         # Logging
