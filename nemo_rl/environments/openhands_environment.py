@@ -129,7 +129,8 @@ class OpenhandsEnvironment:
             "top_p": self.config["top_p"],
             # Max tool calls
             "max_iterations": self.max_turns,
-            # Response length limit
+            # length limit
+            "max_input_tokens": self.max_prompt_length,
             "max_output_tokens": self.max_response_length,
             "token_level_generation": token_level_generation,
             "custom_tokenizer": self.full_config["policy"]["tokenizer"]["name"],
