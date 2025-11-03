@@ -17,10 +17,8 @@ MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill
 NUM_ACTOR_NODES=4
 NUM_ACTOR_GPUS=8
 
-export OPENHANDS_SERVER_INIT_WORKERS=1024
-export OPENHANDS_SERVER_RUN_WORKERS=1024
-export OPENHANDS_NUM_WORKERS=1024
-export OPENHANDS_TIMEOUT=300
+export OPENHANDS_NUM_WORKERS=2048
+export OPENHANDS_TIMEOUT=500
 
 HOME_DIR="/lustre/fsw/portfolios/nvr/users/jianh"
 HOME_DIR2="/lustre/fsw/portfolios/nvr/users/mingjiel"

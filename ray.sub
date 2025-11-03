@@ -219,7 +219,6 @@ sleep 10s
 # ==================== Start OpenHands on all nodes ====================
 echo "Starting OpenHands servers on all nodes..."
 OPENHANDS_CONTAINER="/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh"
-OH_RUNTIME_SINGULARITY_IMAGE_REPO="/lustre/fs1/portfolios/llmservice/users/shaokunz/Openhands2/OpenHands_internal/singularity_images_v2"
 openhands_urls=""
 for i in "${!nodes_array[@]}"; do
     node=${nodes_array[$i]}
@@ -231,11 +230,12 @@ for i in "${!nodes_array[@]}"; do
         -o $LOG_DIR/openhands-worker-$i.out -e $LOG_DIR/openhands-worker-$i.err \
         bash -c "cd $OPENHANDS_DIR \
             && export PYTHONPATH=$OPENHANDS_DIR \
-            && export OH_RUNTIME_SINGULARITY_IMAGE_REPO=$OH_RUNTIME_SINGULARITY_IMAGE_REPO \
             && export PRORL_TOKENIZER=$PRORL_TOKENIZER \
             && export LOG_LEVEL=ERROR \
             && export DEBUG=False \
-            && nohup python scripts/start_server.py --max-init-workers ${OPENHANDS_SERVER_INIT_WORKERS} --max-run-workers ${OPENHANDS_SERVER_RUN_WORKERS} --max-eval-workers ${OPENHANDS_SERVER_INIT_WORKERS} --timeout ${OPENHANDS_TIMEOUT} --reward-server-ip localhost --use-thread-based-server" &
+            && cd scripts \
+            && redis-server --daemonize yes --port 7777 \
+            && nohup gunicorn \"start_server_lite:create_app(reward_server_ip=['localhost'], timeout=$OPENHANDS_TIMEOUT, redis_url='redis://localhost:7777/0')\" --worker-class uvicorn.workers.UvicornWorker --workers 8 --bind 0.0.0.0:8006" &
 
     # Build the URLs string
     if [ -z "$openhands_urls" ]; then
