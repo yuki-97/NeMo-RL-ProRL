@@ -216,39 +216,39 @@ for i in "${!nodes_array[@]}"; do
 done
 sleep 10s
 
-# ==================== Start OpenHands on all nodes ====================
-echo "Starting OpenHands servers on all nodes..."
-OPENHANDS_CONTAINER="/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh"
-openhands_urls=""
+# ==================== Start ProRL Agent on all nodes ====================
+echo "Starting ProRL Agent Server on all nodes..."
+PRORL_SERVER_CONTAINER="/lustre/fsw/portfolios/nvr/users/mingjiel/containers/nvidian+nemo+verl_v2+vllm0.10dev_enroot.sqsh"
+prorl_server_urls=""
 for i in "${!nodes_array[@]}"; do
     node=${nodes_array[$i]}
     node_ip=${ip_addresses_array[$i]}
 
-    # Start OpenHands server on this node in background
+    # Start ProRL Agent Server on this node in background
     srun --overlap --nodes=1 --ntasks=1 -w $node \
-        --no-container-mount-home --container-image=$OPENHANDS_CONTAINER --container-mounts=$MOUNTS \
-        -o $LOG_DIR/openhands-worker-$i.out -e $LOG_DIR/openhands-worker-$i.err \
-        bash -c "cd $OPENHANDS_DIR \
-            && export PYTHONPATH=$OPENHANDS_DIR \
+        --no-container-mount-home --container-image=$PRORL_SERVER_CONTAINER --container-mounts=$MOUNTS \
+        -o $LOG_DIR/prorl-server-$i.out -e $LOG_DIR/prorl-server-$i.err \
+        bash -c "cd $PRORL_SERVER_DIR \
+            && export PYTHONPATH=$PRORL_SERVER_DIR \
             && export PRORL_TOKENIZER=$PRORL_TOKENIZER \
             && export LOG_LEVEL=ERROR \
             && export DEBUG=False \
             && cd scripts \
             && redis-server --daemonize yes --port 7777 \
-            && nohup gunicorn \"start_server_lite:create_app(reward_server_ip=['localhost'], timeout=$OPENHANDS_TIMEOUT, redis_url='redis://localhost:7777/0')\" --worker-class uvicorn.workers.UvicornWorker --workers 8 --bind 0.0.0.0:8006" &
+            && nohup gunicorn \"start_server_lite:create_app(reward_server_ip=['localhost'], timeout=$PRORL_SERVER_TIMEOUT, redis_url='redis://localhost:7777/0')\" --worker-class uvicorn.workers.UvicornWorker --workers 8 --bind 0.0.0.0:8006" &
 
     # Build the URLs string
-    if [ -z "$openhands_urls" ]; then
-        openhands_urls="http://$node_ip:8006"
+    if [ -z "$prorl_server_urls" ]; then
+        prorl_server_urls="http://$node_ip:8006"
     else
-        openhands_urls="$openhands_urls+http://$node_ip:8006"
+        prorl_server_urls="$prorl_server_urls+http://$node_ip:8006"
     fi
 done
 
-# Add the OpenHands URLs to the command
-echo "OPENHANDS_URLS=$openhands_urls"
-if [[ -n "$COMMAND" && -n "$openhands_urls" ]]; then
-    COMMAND="OPENHANDS_URLS=$openhands_urls ${COMMAND}"
+# Add the ProRL Agent URLs to the command
+echo "PRORL_SERVER_URLS=$prorl_server_urls"
+if [[ -n "$COMMAND" && -n "$prorl_server_urls" ]]; then
+    COMMAND="PRORL_SERVER_URLS=$prorl_server_urls ${COMMAND}"
 fi
 
 # First we start the head of the ray cluster on one of the physical nodes

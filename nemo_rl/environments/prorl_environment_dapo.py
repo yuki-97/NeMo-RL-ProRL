@@ -9,13 +9,13 @@ from transformers import PreTrainedTokenizerBase
 
 from nemo_rl.algorithms.grpo import MasterConfig
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
-from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
+from nemo_rl.environments.prorl_environment import ProRLEnvironment
 
 logger = logging.getLogger(__name__)
 
 
-class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
-    """OpenhandsEnvironmentDAPO extends OpenhandsEnvironment with DAPO filtering capabilities.
+class ProRLEnvironmentDAPO(ProRLEnvironment):
+    """ProRLEnvironmentDAPO extends ProRLEnvironment with DAPO filtering capabilities.
 
     This class provides difficulty-aware policy optimization (DAPO) support by:
     1. Filtering easy/hard instances based on solved trajectories
@@ -35,7 +35,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         dp_size: int,
         dataloader: StatefulDataLoader,
     ):
-        """Initialize OpenhandsEnvironmentDAPO.
+        """Initialize ProRLEnvironmentDAPO.
 
         Args:
             config (MasterConfig): Complete configuration object
@@ -73,15 +73,15 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         # Start total timing for performance analysis
         total_start_time = time.time()
 
-        # Time OpenHands request processing phase
+        # Time ProRL Server request processing phase
         request_start_time = time.time()
         output_messages, input_batch = asyncio.run(
-            self.request_from_openhands_dapo(requested_batch_size)
+            self.request_from_prorl_server_dapo(requested_batch_size)
         )
         request_end_time = time.time()
 
         logger.info(
-            f"request_from_openhands_dapo time: {request_end_time - request_start_time:.3f}s"
+            f"request_from_prorl_server_dapo time: {request_end_time - request_start_time:.3f}s"
         )
 
         # Time result conversion phase
@@ -125,11 +125,11 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
         return batch, data_index
 
-    async def request_from_openhands_dapo(self, requested_batch_size: int):
-        """Process conversation requests using OpenHands servers with DAPO filtering.
+    async def request_from_prorl_server_dapo(self, requested_batch_size: int):
+        """Process conversation requests using ProRL Server with DAPO filtering.
 
         This method implements the core DAPO logic:
-        1. Start OpenHands servers
+        1. Start ProRL Server
         2. Dispatch jobs to available servers
         3. Collect results and filter easy/hard instances
         4. Continue until requested_batch_size instances are collected
@@ -149,12 +149,12 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
         # Start total timing for performance analysis
         total_start_time = time.time()
 
-        # Start all OpenHands servers concurrently
+        # Start all ProRL Server concurrently
         server_start_time = time.time()
         await self.start_servers()
         server_end_time = time.time()
         logger.info(
-            f"Starting OpenHands servers took: {server_end_time - server_start_time:.2f} seconds"
+            f"Starting ProRL Server took: {server_end_time - server_start_time:.2f} seconds"
         )
 
         self.existing_ids = set()
@@ -163,8 +163,8 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
             # Initialize result storage
             all_responses = {}
 
-            if not self.openhands_urls:
-                logger.error("No OpenHands base URLs configured")
+            if not self.prorl_server_urls:
+                logger.error("No ProRL Server base URLs configured")
                 return {}, BatchedDataDict({})
 
             # Thread-safe queue management with asyncio locks
@@ -184,8 +184,8 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
 
             # Initialize server pool - all servers start as available
             max_active_tasks = 0
-            for server_url in self.openhands_urls:
-                for worker_idx in range(self.openhands_num_workers):
+            for server_url in self.prorl_server_urls:
+                for worker_idx in range(self.prorl_server_num_workers):
                     await available_servers_queue.put(
                         f"{server_url}|worker_{worker_idx}"
                     )
@@ -294,11 +294,14 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
                 """Process a single job on an assigned server."""
                 current_task = asyncio.current_task()
                 try:
-                    # Send request to OpenHands server
-                    result, should_retry = await self._send_single_message_to_openhands(
+                    # Send request to ProRL Server
+                    (
+                        result,
+                        should_retry,
+                    ) = await self._send_single_message_to_prorl_server(
                         message=message,
                         message_index=message_index,
-                        openhands_base_url=server_url,
+                        prorl_server_url=server_url,
                         is_val=False,  # DAPO is only used for training
                     )
 
@@ -543,7 +546,7 @@ class OpenhandsEnvironmentDAPO(OpenhandsEnvironment):
             return all_responses, output_batch
 
         except Exception as e:
-            logger.error(f"Error in request_from_openhands_dapo: {e}")
+            logger.error(f"Error in request_from_prorl_server_dapo: {e}")
             raise
 
         finally:

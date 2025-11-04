@@ -39,7 +39,7 @@ def format_instance(item: dict) -> dict:
     if "instance" in item:
         return item
 
-    # we copy instance data to 'instance' key for agent training delegating to openhands.
+    # we copy instance data to 'instance' key for agent training delegating to prorl server.
     # swebench tasks already have 'instance' key.
     original_keys = list(item.keys())
     item["instance"] = item.copy()
@@ -117,15 +117,15 @@ def setup_env(
     env_use_dapo = master_config["env"].get("use_dapo", False)
 
     if env_use_dapo:
-        from nemo_rl.environments.openhands_environment_dapo import (
-            OpenhandsEnvironmentDAPO,
+        from nemo_rl.environments.prorl_environment_dapo import (
+            ProRLEnvironmentDAPO,
         )
 
-        env_cls = OpenhandsEnvironmentDAPO
+        env_cls = ProRLEnvironmentDAPO
     else:
-        from nemo_rl.environments.openhands_environment import OpenhandsEnvironment
+        from nemo_rl.environments.prorl_environment import ProRLEnvironment
 
-        env_cls = OpenhandsEnvironment
+        env_cls = ProRLEnvironment
 
     env = env_cls(
         config=master_config,

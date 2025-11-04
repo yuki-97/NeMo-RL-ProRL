@@ -18,8 +18,8 @@ from nemo_rl.distributed.virtual_cluster import _get_node_ip_local
 logger = logging.getLogger(__name__)
 
 
-class OpenhandsEnvironment:
-    """OpenhandsEnvironment manages a distributed group of async LLM server instances.
+class ProRLEnvironment:
+    """ProRLEnvironment manages a distributed group of async LLM server instances.
 
     This class provides a high-level interface for managing multiple vLLM server instances
     running in a Ray cluster. It handles:
@@ -29,9 +29,9 @@ class OpenhandsEnvironment:
        - Managing server addresses and load balancing
        - Health monitoring and restart capabilities
 
-    2. OpenHands Integration:
-       - Distributing LLM server addresses to OpenHands servers
-       - Managing OpenHands worker pools for parallel processing
+    2. ProRL Server Integration:
+       - Distributing LLM server addresses to ProRL Server
+       - Managing ProRL Server worker pools for parallel processing
        - Handling multi-turn conversations with tool usage
 
     3. Request Processing:
@@ -57,7 +57,7 @@ class OpenhandsEnvironment:
         dp_size: int,
         **kwargs,
     ):
-        """Initialize OpenhandsEnvironment with configuration and worker group.
+        """Initialize ProRLEnvironment with configuration and worker group.
 
         Args:
             config (MasterConfig): Complete configuration object
@@ -70,7 +70,7 @@ class OpenhandsEnvironment:
         2. Calculates tensor/data parallel topology
         3. Starts LLM server instances on appropriate nodes
         4. Initializes tokenizer and chat templates
-        5. Configures OpenHands server integration
+        5. Configures ProRL Server integration
         6. Sets up sampling parameters for generation
         """
         # Store configuration
@@ -107,8 +107,8 @@ class OpenhandsEnvironment:
         # Use CPU device for tensor operations (data preparation)
         self.device = torch.device("cpu")
 
-        # OpenHands worker configuration for parallel processing
-        self.openhands_num_workers = self.config.get("openhands_num_workers", 64)
+        # ProRL Server worker configuration for parallel processing
+        self.prorl_server_num_workers = self.config.get("prorl_server_num_workers", 64)
 
         # Extract model name from path for API identification
         model_name = "/".join(self.full_config["policy"]["model_name"].split("/")[-2:])
@@ -145,26 +145,26 @@ class OpenhandsEnvironment:
         ]
         self.val_sampling_params["top_p"] = self.config["val_sampling_cfg"]["top_p"]
 
-        # Parse and validate OpenHands server addresses
-        # OpenHands servers handle multi-turn conversations with tool usage
-        openhands_base_urls = os.environ.get("OPENHANDS_URLS", None)
-        if openhands_base_urls is None:
+        # Parse and validate ProRL Server addresses
+        # ProRL Server handle multi-turn conversations with tool usage
+        prorl_server_urls = os.environ.get("PRORL_SERVER_URLS", None)
+        if prorl_server_urls is None:
             local_ip = _get_node_ip_local()
-            openhands_base_urls = f"http://{local_ip}:8006"
+            prorl_server_urls = f"http://{local_ip}:8006"
 
-        if isinstance(openhands_base_urls, str):
+        if isinstance(prorl_server_urls, str):
             # Support multiple URLs separated by '+'
-            self.openhands_urls = [
-                url.strip() for url in openhands_base_urls.split("+") if url.strip()
+            self.prorl_server_urls = [
+                url.strip() for url in prorl_server_urls.split("+") if url.strip()
             ]
         else:
-            self.openhands_urls = [openhands_base_urls] if openhands_base_urls else []
+            self.prorl_server_urls = [prorl_server_urls] if prorl_server_urls else []
 
-        # Initialize OpenHands servers by clearing existing LLM servers
+        # Initialize ProRL Server by clearing existing LLM servers
         asyncio.run(self.clear_llm_servers())
 
-        # Distribute LLM server addresses to OpenHands servers for load balancing
-        self._send_llm_addresses_to_openhands()
+        # Distribute LLM server addresses to ProRL Server for load balancing
+        self._send_llm_addresses_to_prorl_server()
 
         # Initialize chat template for message formatting
         # Different models require different conversation formats
@@ -172,28 +172,28 @@ class OpenhandsEnvironment:
         self.chat_template = self.tokenizer.chat_template
 
     # ===============================================================================
-    # Assign LLM addresses to OpenHands servers
+    # Assign LLM addresses to ProRL Server
     # ===============================================================================
-    def assign_llm_addresses_to_openhands(self):
-        """Distribute LLM server addresses to OpenHands servers for optimal load balancing.
+    def assign_llm_addresses_to_prorl_server(self):
+        """Distribute LLM server addresses to ProRL Server for optimal load balancing.
 
         This method implements a two-phase assignment strategy:
 
         Phase 1 - Locality-First Assignment:
-        - Assigns LLM servers to OpenHands servers running on the same IP address
+        - Assigns LLM servers to ProRL Server running on the same IP address
         - Minimizes network latency and maximizes bandwidth utilization
         - Reduces cross-node communication overhead
 
         Phase 2 - Load Distribution:
-        - Distributes remaining LLM servers evenly across all OpenHands servers
+        - Distributes remaining LLM servers evenly across all ProRL Server
         - Ensures balanced workload distribution
         - Handles cases where server counts don't divide evenly
 
         Returns:
-            dict: Mapping of OpenHands server URLs to their assigned LLM server addresses
+            dict: Mapping of ProRL Server URLs to their assigned LLM server addresses
 
         The assignment algorithm prioritizes network locality while maintaining
-        load balance across the entire OpenHands server pool.
+        load balance across the entire ProRL Server pool.
         """
 
         def url_to_ip(url):
@@ -204,107 +204,107 @@ class OpenhandsEnvironment:
             url = url.split(":")[0]
             return url
 
-        # Create IP address mappings for both OpenHands and LLM servers
-        openhands_urls2ips = {url: url_to_ip(url) for url in self.openhands_urls}
+        # Create IP address mappings for both ProRL Server and LLM servers
+        prorl_server_urls2ips = {url: url_to_ip(url) for url in self.prorl_server_urls}
         server_addresses2ips = {url: url_to_ip(url) for url in self.server_addresses}
 
-        num_openhands = len(self.openhands_urls)
+        num_prorl_servers = len(self.prorl_server_urls)
         num_llm_servers = len(self.server_addresses)
 
         # Initialize assignment tracking
         address_assignments = {}
         used_addresses = set()
 
-        # Phase 1: Assign LLM servers to OpenHands servers on the same IP
+        # Phase 1: Assign LLM servers to ProRL Server on the same IP
         # This optimizes for network locality and reduces latency
-        for i, openhands_url in enumerate(self.openhands_urls):
+        for i, prorl_server_url in enumerate(self.prorl_server_urls):
             assigned_addresses = []
 
-            # Find all LLM servers on the same IP as this OpenHands server
+            # Find all LLM servers on the same IP as this ProRL Server
             for server_address in self.server_addresses:
                 if (
                     server_addresses2ips[server_address]
-                    == openhands_urls2ips[openhands_url]
+                    == prorl_server_urls2ips[prorl_server_url]
                 ):
                     assigned_addresses.append(server_address)
                     used_addresses.add(server_address)
 
-            address_assignments[openhands_url] = assigned_addresses
+            address_assignments[prorl_server_url] = assigned_addresses
             logger.info(
-                f"Assigned same-IP LLM server addresses to {openhands_url}: {assigned_addresses}"
+                f"Assigned same-IP LLM server addresses to {prorl_server_url}: {assigned_addresses}"
             )
 
-        # Phase 2: Distribute remaining LLM servers evenly among all OpenHands servers
+        # Phase 2: Distribute remaining LLM servers evenly among all ProRL Server
         remaining_addresses = [
             addr for addr in self.server_addresses if addr not in used_addresses
         ]
 
         if remaining_addresses:
             logger.info(
-                f"Distributing {len(remaining_addresses)} remaining LLM servers among {num_openhands} OpenHands servers"
+                f"Distributing {len(remaining_addresses)} remaining LLM servers among {num_prorl_servers} ProRL Server"
             )
 
             # Calculate distribution parameters
-            additional_per_openhands = len(remaining_addresses) // num_openhands
-            remainder = len(remaining_addresses) % num_openhands
+            additional_per_prorl_server = len(remaining_addresses) // num_prorl_servers
+            remainder = len(remaining_addresses) % num_prorl_servers
 
             # Distribute remaining addresses with even load balancing
             addr_index = 0
-            for i, openhands_url in enumerate(self.openhands_urls):
-                # Calculate how many additional addresses this OpenHands server gets
-                num_additional = additional_per_openhands
+            for i, prorl_server_url in enumerate(self.prorl_server_urls):
+                # Calculate how many additional addresses this ProRL Server gets
+                num_additional = additional_per_prorl_server
                 if i < remainder:  # First 'remainder' servers get one extra
                     num_additional += 1
 
-                # Assign additional addresses to this OpenHands server
+                # Assign additional addresses to this ProRL Server
                 for j in range(num_additional):
                     if addr_index < len(remaining_addresses):
-                        address_assignments[openhands_url].append(
+                        address_assignments[prorl_server_url].append(
                             remaining_addresses[addr_index]
                         )
                         addr_index += 1
 
                 logger.info(
-                    f"Final LLM server addresses assigned to {openhands_url}: {address_assignments[openhands_url]}"
+                    f"Final LLM server addresses assigned to {prorl_server_url}: {address_assignments[prorl_server_url]}"
                 )
 
         # Log assignment summary for monitoring and debugging
         total_assigned = sum(len(addrs) for addrs in address_assignments.values())
         logger.info(
-            f"Assignment complete: {total_assigned}/{num_llm_servers} LLM servers assigned to {num_openhands} OpenHands servers"
+            f"Assignment complete: {total_assigned}/{num_llm_servers} LLM servers assigned to {num_prorl_servers} ProRL Server"
         )
 
         return address_assignments
 
-    def _send_llm_addresses_to_openhands(self):
-        """Distribute and send LLM server addresses to multiple OpenHands servers.
+    def _send_llm_addresses_to_prorl_server(self):
+        """Distribute and send LLM server addresses to multiple ProRL Server.
 
-        This method orchestrates the distribution of LLM server addresses to OpenHands servers
+        This method orchestrates the distribution of LLM server addresses to ProRL Server
         for load balancing and fault tolerance. It performs the following steps:
 
-        1. Validates that OpenHands servers are configured
+        1. Validates that ProRL Server are configured
         2. Calculates optimal address assignments using locality-aware algorithm
-        3. Sends addresses asynchronously to all OpenHands servers
+        3. Sends addresses asynchronously to all ProRL Server
         4. Provides detailed logging for monitoring and debugging
 
-        The method ensures that each OpenHands server receives appropriate LLM server
+        The method ensures that each ProRL Server receives appropriate LLM server
         addresses, enabling distributed processing of conversation requests.
         """
-        if not self.openhands_urls:
+        if not self.prorl_server_urls:
             logger.warning(
-                "No OpenHands base URLs configured, skipping LLM address distribution"
+                "No ProRL Server base URLs configured, skipping LLM address distribution"
             )
             return
 
         # Calculate optimal address assignments based on network topology
-        address_assignments = self.assign_llm_addresses_to_openhands()
+        address_assignments = self.assign_llm_addresses_to_prorl_server()
 
-        # Send addresses asynchronously to all OpenHands servers
+        # Send addresses asynchronously to all ProRL Server
         asyncio.run(self._send_addresses_async(address_assignments))
-        logger.info("Successfully sent LLM addresses to all OpenHands servers")
+        logger.info("Successfully sent LLM addresses to all ProRL Server")
 
     async def _send_addresses_async(self, address_assignments: Dict[str, List[str]]):
-        """Asynchronously send LLM addresses to multiple OpenHands servers.
+        """Asynchronously send LLM addresses to multiple ProRL Server.
 
         This method implements concurrent address distribution to minimize setup time:
 
@@ -314,7 +314,7 @@ class OpenhandsEnvironment:
         4. Provides detailed logging for monitoring
 
         Args:
-            address_assignments (Dict[str, List[str]]): Mapping of OpenHands server URLs
+            address_assignments (Dict[str, List[str]]): Mapping of ProRL Server URLs
                 to their assigned LLM server addresses
 
         The concurrent approach significantly reduces setup time compared to
@@ -323,10 +323,12 @@ class OpenhandsEnvironment:
         tasks = []
 
         # Create async tasks for each address assignment
-        for openhands_url, addresses in address_assignments.items():
+        for prorl_server_url, addresses in address_assignments.items():
             for address in addresses:
                 wrapped_address = f"http://{address}"
-                task = self._add_llm_server_to_openhands(openhands_url, wrapped_address)
+                task = self._add_llm_server_to_prorl_server(
+                    prorl_server_url, wrapped_address
+                )
                 tasks.append(task)
 
         # Send all requests concurrently for maximum efficiency
@@ -341,27 +343,29 @@ class OpenhandsEnvironment:
                 success_count += 1
 
         logger.info(
-            f"Successfully sent {success_count}/{len(results)} LLM addresses to OpenHands servers"
+            f"Successfully sent {success_count}/{len(results)} LLM addresses to ProRL Server"
         )
 
-    async def _add_llm_server_to_openhands(self, openhands_base_url: str, address: str):
-        """Send a single LLM server address to an OpenHands server.
+    async def _add_llm_server_to_prorl_server(
+        self, prorl_server_url: str, address: str
+    ):
+        """Send a single LLM server address to an ProRL Server.
 
-        This method handles the HTTP communication with OpenHands servers to register
+        This method handles the HTTP communication with ProRL Server to register
         LLM server addresses. It includes comprehensive error handling and timeout management.
 
         Args:
-            openhands_base_url (str): Base URL of the OpenHands server
+            prorl_server_url (str): Base URL of the ProRL Server
             address (str): HTTP address of the LLM server to register
 
         Returns:
-            dict: Response from the OpenHands server on successful registration
+            dict: Response from the ProRL Server on successful registration
 
         Raises:
             Exception: On HTTP errors, timeouts, or communication failures
 
         The method uses proper session management and timeout handling to ensure
-        reliable communication with OpenHands servers.
+        reliable communication with ProRL Server.
         """
         try:
             # Configure reasonable timeout for server communication
@@ -370,7 +374,7 @@ class OpenhandsEnvironment:
 
             try:
                 # Prepare request URL and payload
-                url = f"{openhands_base_url}/add_llm_server"
+                url = f"{prorl_server_url}/add_llm_server"
                 payload = {"address": address}
 
                 # Send POST request to register LLM server
@@ -378,14 +382,14 @@ class OpenhandsEnvironment:
                     if response.status == 200:
                         result = await response.json()
                         logger.info(
-                            f"LLM server {address} added successfully to {openhands_base_url}: {result}"
+                            f"LLM server {address} added successfully to {prorl_server_url}: {result}"
                         )
                         return result
                     else:
                         # Handle HTTP error responses
                         error_text = await response.text()
                         logger.error(
-                            f"Failed to add LLM server {address} to {openhands_base_url}, HTTP {response.status}: {error_text}"
+                            f"Failed to add LLM server {address} to {prorl_server_url}, HTTP {response.status}: {error_text}"
                         )
                         raise Exception(f"HTTP {response.status}: {error_text}")
 
@@ -394,12 +398,12 @@ class OpenhandsEnvironment:
                 await session.close()
 
         except asyncio.TimeoutError:
-            error_msg = f"Timeout adding LLM server {address} to {openhands_base_url}"
+            error_msg = f"Timeout adding LLM server {address} to {prorl_server_url}"
             logger.error(error_msg)
             raise Exception(error_msg)
         except Exception as e:
             logger.error(
-                f"Error adding LLM server {address} to {openhands_base_url}: {e}"
+                f"Error adding LLM server {address} to {prorl_server_url}: {e}"
             )
             raise
 
@@ -409,10 +413,10 @@ class OpenhandsEnvironment:
     def BatchedDataDict2Messages(
         self, prompts: BatchedDataDict, is_val: bool = False
     ) -> list[dict]:
-        """Convert BatchedDataDict input to OpenHands message format.
+        """Convert BatchedDataDict input to ProRL Server message format.
 
         This method transforms the structured BatchedDataDict input into the message format
-        expected by OpenHands servers. It handles trajectory expansion to generate
+        expected by ProRL Server. It handles trajectory expansion to generate
         multiple conversation variants from each input prompt.
 
         Args:
@@ -423,11 +427,11 @@ class OpenhandsEnvironment:
             is_val (bool): Whether the rollout is for validation
 
         Returns:
-            list: List of message dictionaries formatted for OpenHands processing
+            list: List of message dictionaries formatted for ProRL Server processing
                 Each message contains:
                 - Original instance data
                 - trajectory_id: Unique identifier for this conversation variant
-                - All necessary context for OpenHands processing
+                - All necessary context for ProRL Server processing
 
         The method creates multiple trajectories per instance to enable diverse
         solution exploration and improved training data generation.
@@ -450,7 +454,7 @@ class OpenhandsEnvironment:
         return new_messages
 
     def Results2BatchedDataDict(self, results: dict, input_batch) -> BatchedDataDict:
-        """Convert OpenHands conversation results to BatchedDataDict format for training.
+        """Convert ProRL Server conversation results to BatchedDataDict format for training.
 
         Args:
             results (dict): Dictionary with structure {instance_id: {trajectory_id: result_dict}}
@@ -579,7 +583,7 @@ class OpenhandsEnvironment:
                         "is_padded": trajectory.get("is_padded", False),
                     }
                 )
-                result_dict["task_name"].append("openhands")
+                result_dict["task_name"].append("prorl")
                 result_dict["total_reward"].append(trajectory.get("score", 0.0))
                 # result_dict["idx"].append(trajectory["idx"])
                 result_dict["truncated"].append(
@@ -678,17 +682,17 @@ class OpenhandsEnvironment:
     def run_async_rollout(
         self, batch: BatchedDataDict, is_val: bool = False
     ) -> tuple[BatchedDataDict, dict]:
-        """Generate multiple conversation sequences in parallel via OpenHands servers.
+        """Generate multiple conversation sequences in parallel via ProRL Server.
 
         This is the main entry point for conversation generation. It orchestrates
         the entire pipeline from input processing to result aggregation:
 
         1. Input Processing:
-           - Converts BatchedDataDict to OpenHands message format
+           - Converts BatchedDataDict to ProRL Server message format
            - Expands single instances to multiple trajectories
 
         2. Parallel Generation:
-           - Distributes requests across OpenHands servers
+           - Distributes requests across ProRL Server
            - Manages concurrent processing with load balancing
            - Handles retries and error recovery
 
@@ -722,15 +726,15 @@ class OpenhandsEnvironment:
             f"BatchedDataDict2Messages time: {convert_end_time - convert_start_time:.3f}s"
         )
 
-        # Time OpenHands request processing phase
+        # Time ProRL Server request processing phase
         request_start_time = time.time()
         output_messages = asyncio.run(
-            self.request_from_openhands(messages, is_val=is_val)
+            self.request_from_prorl_server(messages, is_val=is_val)
         )
         request_end_time = time.time()
 
         logger.info(
-            f"request_from_openhands time: {request_end_time - request_start_time:.3f}s"
+            f"request_from_prorl_server time: {request_end_time - request_start_time:.3f}s"
         )
 
         # Time result conversion phase
@@ -751,29 +755,29 @@ class OpenhandsEnvironment:
     # Helper Functions
     # ===============================================================================
     async def clear_llm_servers(self):
-        """Clear all LLM servers from OpenHands servers.
+        """Clear all LLM servers from ProRL Server.
 
         This method removes all previously registered LLM server addresses from
-        OpenHands servers. It's typically called during initialization to ensure
+        ProRL Server. It's typically called during initialization to ensure
         a clean state before registering new servers.
 
-        The operation is performed concurrently across all OpenHands servers
+        The operation is performed concurrently across all ProRL Server
         to minimize setup time and ensure consistent state.
         """
-        if not self.openhands_urls:
+        if not self.prorl_server_urls:
             logger.warning(
-                "No OpenHands base URLs configured, skipping clear llm servers"
+                "No ProRL Server base URLs configured, skipping clear llm servers"
             )
             return
 
         logger.info(
-            f"Clearing llm servers from {len(self.openhands_urls)} OpenHands servers"
+            f"Clearing llm servers from {len(self.prorl_server_urls)} ProRL Server"
         )
 
         # Clear all llm servers concurrently for efficiency
         tasks = []
-        for openhands_url in self.openhands_urls:
-            task = self._clear_llm_servers_single_server(openhands_url)
+        for prorl_server_url in self.prorl_server_urls:
+            task = self._clear_llm_servers_single_server(prorl_server_url)
             tasks.append(task)
 
         # Wait for all clear operations to complete
@@ -784,23 +788,23 @@ class OpenhandsEnvironment:
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
-                    f"Failed to clear llm servers from server {self.openhands_urls[i]}: {result}"
+                    f"Failed to clear llm servers from server {self.prorl_server_urls[i]}: {result}"
                 )
             else:
                 success_count += 1
 
         logger.info(
-            f"Successfully cleared llm servers from {success_count}/{len(self.openhands_urls)} OpenHands servers"
+            f"Successfully cleared llm servers from {success_count}/{len(self.prorl_server_urls)} ProRL Server"
         )
 
-    async def _clear_llm_servers_single_server(self, openhands_base_url: str):
-        """Clear LLM servers from a single OpenHands server.
+    async def _clear_llm_servers_single_server(self, prorl_server_url: str):
+        """Clear LLM servers from a single ProRL Server.
 
         Args:
-            openhands_base_url (str): Base URL of the OpenHands server
+            prorl_server_url (str): Base URL of the ProRL Server
 
         Returns:
-            dict: Response from the OpenHands server
+            dict: Response from the ProRL Server
 
         Raises:
             Exception: On HTTP errors or communication failures
@@ -810,19 +814,19 @@ class OpenhandsEnvironment:
             session = aiohttp.ClientSession(timeout=timeout)
 
             try:
-                url = f"{openhands_base_url}/clear_llm_server"
+                url = f"{prorl_server_url}/clear_llm_server"
 
                 async with session.post(url) as response:
                     if response.status == 200:
                         result = await response.json()
                         logger.info(
-                            f"Cleared llm servers from OpenHands server {openhands_base_url}: {result}"
+                            f"Cleared llm servers from ProRL Server {prorl_server_url}: {result}"
                         )
                         return result
                     else:
                         error_text = await response.text()
                         logger.error(
-                            f"Failed to clear llm servers from OpenHands server {openhands_base_url}, "
+                            f"Failed to clear llm servers from ProRL Server {prorl_server_url}, "
                             f"HTTP {response.status}: {error_text}"
                         )
                         raise Exception(f"HTTP {response.status}: {error_text}")
@@ -830,29 +834,31 @@ class OpenhandsEnvironment:
                 await session.close()
         except Exception as e:
             logger.error(
-                f"Error clearing llm servers from OpenHands server {openhands_base_url}: {e}"
+                f"Error clearing llm servers from ProRL Server {prorl_server_url}: {e}"
             )
             raise
 
     async def start_servers(self):
-        """Start all OpenHands servers concurrently.
+        """Start all ProRL Server concurrently.
 
-        This method activates all configured OpenHands servers, preparing them
+        This method activates all configured ProRL Server, preparing them
         for request processing. It's called before beginning conversation generation
         to ensure all servers are ready to handle requests.
 
         The startup process is performed concurrently to minimize initialization time.
         """
-        if not self.openhands_urls:
-            logger.warning("No OpenHands base URLs configured, skipping server start")
+        if not self.prorl_server_urls:
+            logger.warning(
+                "No ProRL Server base URLs configured, skipping server start"
+            )
             return
 
-        logger.info(f"Starting {len(self.openhands_urls)} OpenHands servers")
+        logger.info(f"Starting {len(self.prorl_server_urls)} ProRL Server")
 
         # Start all servers concurrently
         tasks = []
-        for openhands_url in self.openhands_urls:
-            task = self._start_single_server(openhands_url)
+        for prorl_server_url in self.prorl_server_urls:
+            task = self._start_single_server(prorl_server_url)
             tasks.append(task)
 
         # Wait for all servers to start
@@ -863,33 +869,33 @@ class OpenhandsEnvironment:
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
-                    f"Failed to start server {self.openhands_urls[i]}: {result}"
+                    f"Failed to start server {self.prorl_server_urls[i]}: {result}"
                 )
             else:
                 success_count += 1
 
         logger.info(
-            f"Successfully started {success_count}/{len(self.openhands_urls)} OpenHands servers"
+            f"Successfully started {success_count}/{len(self.prorl_server_urls)} ProRL Server"
         )
 
     async def stop_servers(self):
-        """Stop all OpenHands servers concurrently.
+        """Stop all ProRL Server concurrently.
 
-        This method gracefully shuts down all OpenHands servers after request
+        This method gracefully shuts down all ProRL Server after request
         processing is complete. It ensures proper cleanup and resource deallocation.
 
         The shutdown process is performed concurrently to minimize cleanup time.
         """
-        if not self.openhands_urls:
-            logger.warning("No OpenHands base URLs configured, skipping server stop")
+        if not self.prorl_server_urls:
+            logger.warning("No ProRL Server base URLs configured, skipping server stop")
             return
 
-        logger.info(f"Stopping {len(self.openhands_urls)} OpenHands servers")
+        logger.info(f"Stopping {len(self.prorl_server_urls)} ProRL Server")
 
         # Stop all servers concurrently
         tasks = []
-        for openhands_url in self.openhands_urls:
-            task = self._stop_single_server(openhands_url)
+        for prorl_server_url in self.prorl_server_urls:
+            task = self._stop_single_server(prorl_server_url)
             tasks.append(task)
 
         # Wait for all servers to stop
@@ -900,26 +906,26 @@ class OpenhandsEnvironment:
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
-                    f"Failed to stop server {self.openhands_urls[i]}: {result}"
+                    f"Failed to stop server {self.prorl_server_urls[i]}: {result}"
                 )
             else:
                 success_count += 1
 
         logger.info(
-            f"Successfully stopped {success_count}/{len(self.openhands_urls)} OpenHands servers"
+            f"Successfully stopped {success_count}/{len(self.prorl_server_urls)} ProRL Server"
         )
 
-    async def _start_single_server(self, openhands_base_url: str):
-        """Start a single OpenHands server.
+    async def _start_single_server(self, prorl_server_url: str):
+        """Start a single ProRL Server.
 
-        This method sends a start request to a specific OpenHands server and waits
+        This method sends a start request to a specific ProRL Server and waits
         for successful activation. It includes proper error handling and timeout management.
 
         Args:
-            openhands_base_url (str): Base URL of the OpenHands server to start
+            prorl_server_url (str): Base URL of the ProRL Server to start
 
         Returns:
-            dict: Response from the OpenHands server on successful startup
+            dict: Response from the ProRL Server on successful startup
 
         Raises:
             Exception: On HTTP errors, timeouts, or communication failures
@@ -929,19 +935,19 @@ class OpenhandsEnvironment:
             session = aiohttp.ClientSession(timeout=timeout)
 
             try:
-                url = f"{openhands_base_url}/start"
+                url = f"{prorl_server_url}/start"
 
                 async with session.post(url) as response:
                     if response.status == 200:
                         result = await response.json()
                         logger.info(
-                            f"OpenHands server {openhands_base_url} started successfully: {result}"
+                            f"ProRL Server {prorl_server_url} started successfully: {result}"
                         )
                         return result
                     else:
                         error_text = await response.text()
                         logger.error(
-                            f"Failed to start OpenHands server {openhands_base_url}, "
+                            f"Failed to start ProRL Server {prorl_server_url}, "
                             f"HTTP {response.status}: {error_text}"
                         )
                         raise Exception(f"HTTP {response.status}: {error_text}")
@@ -950,24 +956,24 @@ class OpenhandsEnvironment:
                 await session.close()
 
         except asyncio.TimeoutError:
-            error_msg = f"Timeout starting OpenHands server {openhands_base_url}"
+            error_msg = f"Timeout starting ProRL Server {prorl_server_url}"
             logger.error(error_msg)
             raise Exception(error_msg)
         except Exception as e:
-            logger.error(f"Error starting OpenHands server {openhands_base_url}: {e}")
+            logger.error(f"Error starting ProRL Server {prorl_server_url}: {e}")
             raise
 
-    async def _stop_single_server(self, openhands_base_url: str):
-        """Stop a single OpenHands server.
+    async def _stop_single_server(self, prorl_server_url: str):
+        """Stop a single ProRL Server.
 
-        This method sends a stop request to a specific OpenHands server and waits
+        This method sends a stop request to a specific ProRL Server and waits
         for graceful shutdown. It includes proper error handling and timeout management.
 
         Args:
-            openhands_base_url (str): Base URL of the OpenHands server to stop
+            prorl_server_url (str): Base URL of the ProRL Server to stop
 
         Returns:
-            dict: Response from the OpenHands server on successful shutdown
+            dict: Response from the ProRL Server on successful shutdown
 
         Raises:
             Exception: On HTTP errors, timeouts, or communication failures
@@ -977,19 +983,19 @@ class OpenhandsEnvironment:
             session = aiohttp.ClientSession(timeout=timeout)
 
             try:
-                url = f"{openhands_base_url}/stop"
+                url = f"{prorl_server_url}/stop"
 
                 async with session.post(url) as response:
                     if response.status == 200:
                         result = await response.json()
                         logger.info(
-                            f"OpenHands server {openhands_base_url} stopped successfully: {result}"
+                            f"ProRL Server {prorl_server_url} stopped successfully: {result}"
                         )
                         return result
                     else:
                         error_text = await response.text()
                         logger.error(
-                            f"Failed to stop OpenHands server {openhands_base_url}, "
+                            f"Failed to stop ProRL Server {prorl_server_url}, "
                             f"HTTP {response.status}: {error_text}"
                         )
                         raise Exception(f"HTTP {response.status}: {error_text}")
@@ -998,20 +1004,20 @@ class OpenhandsEnvironment:
                 await session.close()
 
         except asyncio.TimeoutError:
-            error_msg = f"Timeout stopping OpenHands server {openhands_base_url}"
+            error_msg = f"Timeout stopping ProRL Server {prorl_server_url}"
             logger.error(error_msg)
             raise Exception(error_msg)
         except Exception as e:
-            logger.error(f"Error stopping OpenHands server {openhands_base_url}: {e}")
+            logger.error(f"Error stopping ProRL Server {prorl_server_url}: {e}")
             raise
 
-    async def request_from_openhands(self, messages: List, is_val: bool = False):
-        """Process conversation requests using OpenHands servers with intelligent load balancing.
+    async def request_from_prorl_server(self, messages: List, is_val: bool = False):
+        """Process conversation requests using ProRL Server with intelligent load balancing.
 
         This method implements a sophisticated request distribution system that:
 
         1. Server Management:
-           - Starts all OpenHands servers concurrently
+           - Starts all ProRL Server concurrently
            - Tracks server availability in real-time
            - Gracefully shuts down servers after processing
 
@@ -1048,20 +1054,20 @@ class OpenhandsEnvironment:
         # Start total timing for performance analysis
         total_start_time = time.time()
 
-        # Start all OpenHands servers concurrently
+        # Start all ProRL Server concurrently
         server_start_time = time.time()
         await self.start_servers()
         server_end_time = time.time()
         logger.info(
-            f"Starting OpenHands servers took: {server_end_time - server_start_time:.2f} seconds"
+            f"Starting ProRL Server took: {server_end_time - server_start_time:.2f} seconds"
         )
 
         try:
             # Initialize result storage
             all_responses = {}
 
-            if not self.openhands_urls:
-                logger.error("No OpenHands base URLs configured")
+            if not self.prorl_server_urls:
+                logger.error("No ProRL Server base URLs configured")
                 return {}
 
             # Thread-safe queue management with asyncio locks
@@ -1081,8 +1087,8 @@ class OpenhandsEnvironment:
 
             # Initialize server pool - all servers start as available
             max_active_tasks = 0
-            for server_url in self.openhands_urls:
-                for worker_idx in range(self.openhands_num_workers):
+            for server_url in self.prorl_server_urls:
+                for worker_idx in range(self.prorl_server_num_workers):
                     await available_servers_queue.put(
                         f"{server_url}|worker_{worker_idx}"
                     )
@@ -1150,11 +1156,14 @@ class OpenhandsEnvironment:
             ):
                 """Process a single job on an assigned server."""
                 try:
-                    # Send request to OpenHands server
-                    result, should_retry = await self._send_single_message_to_openhands(
+                    # Send request to ProRL Server
+                    (
+                        result,
+                        should_retry,
+                    ) = await self._send_single_message_to_prorl_server(
                         message=message,
                         message_index=message_index,
-                        openhands_base_url=server_url,
+                        prorl_server_url=server_url,
                         is_val=is_val,
                     )
 
@@ -1278,29 +1287,29 @@ class OpenhandsEnvironment:
             stop_end_time = time.time()
             logger.info(f"Server shutdown took: {stop_end_time - stop_start_time:.2f}s")
 
-    async def _send_single_message_to_openhands(
+    async def _send_single_message_to_prorl_server(
         self,
         message: dict,
         message_index: int,
-        openhands_base_url: str,
+        prorl_server_url: str,
         is_val: bool = False,
     ):
-        """Send single message to openhands server.
+        """Send single message to ProRL Server.
 
-        This method handles the HTTP communication with OpenHands servers to process
+        This method handles the HTTP communication with ProRL Server to process
         a single conversation request. It includes comprehensive error handling,
         timeout management, and retry logic.
 
         Args:
             message (dict): A single message dictionary containing the conversation
-                to be processed by OpenHands.
+                to be processed by ProRL Server.
             message_index (int): The index of the message in the input batch.
-            openhands_base_url (str): The base URL of the OpenHands server.
+            prorl_server_url (str): The base URL of the ProRL Server.
             is_val (bool): Whether the rollout is for validation
 
         Returns:
             tuple: A tuple (result, should_retry) where:
-                - result (dict or Exception): The response from OpenHands or an exception.
+                - result (dict or Exception): The response from ProRL Server or an exception.
                 - should_retry (bool): True if the message should be retried, False otherwise.
         """
         try:
@@ -1316,7 +1325,7 @@ class OpenhandsEnvironment:
 
             try:
                 async with session.post(
-                    url=f"{openhands_base_url}/process",
+                    url=f"{prorl_server_url}/process",
                     headers={"Content-Type": "application/json"},
                     json=request_data,
                 ) as resp:
@@ -1336,10 +1345,10 @@ class OpenhandsEnvironment:
                 await session.close()
 
         except asyncio.TimeoutError as e:
-            logger.error(f"Error sending message {message_index} to OpenHands: {e}")
+            logger.error(f"Error sending message {message_index} to ProRL Server: {e}")
             return None, True  # Retry needed
         except Exception as e:
-            logger.error(f"Error sending message {message_index} to OpenHands: {e}")
+            logger.error(f"Error sending message {message_index} to ProRL Server: {e}")
             return None, True  # Retry needed
 
     def get_server_info(self) -> List[Tuple[str, int]]:

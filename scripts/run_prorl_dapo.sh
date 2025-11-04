@@ -5,7 +5,7 @@ export WANDB_API_KEY=
 export HF_TOKEN=
 export HF_HOME=
 export HF_DATASETS_CACHE=
-export OPENHANDS_DIR=
+export PRORL_SERVER_DIR=
 # tmp for sandbox
 export VERL_DIR=
 
@@ -17,8 +17,8 @@ MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill
 NUM_ACTOR_NODES=4
 NUM_ACTOR_GPUS=8
 
-export OPENHANDS_NUM_WORKERS=2048
-export OPENHANDS_TIMEOUT=500
+export PRORL_SERVER_NUM_WORKERS=2048
+export PRORL_SERVER_TIMEOUT=500
 
 HOME_DIR="/lustre/fsw/portfolios/nvr/users/jianh"
 HOME_DIR2="/lustre/fsw/portfolios/nvr/users/mingjiel"
@@ -29,7 +29,7 @@ VAL_DATA="['$HOME_DIR2/data/validation/aime_codeforces_gpqa_reasoning.parquet','
 
 # run command
 RUN_COMMAND="NRL_FORCE_REBUILD_VENVS=true \
-uv run python examples/run_grpo_openhands.py \
+uv run python examples/run_prorl.py \
     --config examples/configs/reinforce_plus_plus.yaml \
     grpo.num_prompts_per_step=512 \
     grpo.num_generations_per_prompt=16 \
@@ -55,7 +55,7 @@ uv run python examples/run_grpo_openhands.py \
     policy.logprob_batch_size=1 \
     policy.dtensor_cfg.activation_checkpointing=true \
     policy.dtensor_cfg.cpu_offload=true \
-    ++policy.generation.openhands_num_workers=${OPENHANDS_NUM_WORKERS} \
+    ++policy.generation.prorl_server_num_workers=${PRORL_SERVER_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
     ++policy.generation.max_prompt_length=1024 \
     ++policy.generation.max_response_length=8192 \
