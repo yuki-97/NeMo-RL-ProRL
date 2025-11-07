@@ -10,7 +10,7 @@ export PRORL_SERVER_DIR=
 export VERL_DIR=
 
 PROJECT_NAME=prorl-yukih
-EXP_NAME=nemorl-rf++-baseline-dapo
+EXP_NAME=nemorl-rf++-baseline-dapo-mcore
 
 MODEL_NAME="/lustre/fsw/portfolios/nvr/users/mingjiel/models/DeepSeek-R1-Distill-Qwen-1.5B"
 
@@ -53,6 +53,11 @@ uv run python examples/run_prorl.py \
     policy.train_global_batch_size=1024 \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
+    policy.dtensor_cfg.enabled=false \
+    policy.megatron_cfg.enabled=true \
+    policy.megatron_cfg.empty_unused_memory_level=1 \
+    policy.megatron_cfg.optimizer.lr=1e-6 \
+    policy.megatron_cfg.optimizer.min_lr=1e-6 \
     ++policy.generation.prorl_server_num_workers=${PRORL_SERVER_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
     ++policy.generation.max_prompt_length=1024 \
@@ -64,7 +69,6 @@ uv run python examples/run_prorl.py \
     policy.generation.vllm_cfg.gpu_memory_utilization=0.75 \
     policy.dynamic_batching.enabled=true \
     policy.sequence_packing.enabled=false \
-    policy.optimizer.kwargs.lr=1e-6 \
     ++data.train_data_path=${TRAIN_DATA} \
     ++data.val_data_path=${VAL_DATA} \
     ++data.use_raw_data=true \

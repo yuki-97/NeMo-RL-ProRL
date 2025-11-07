@@ -84,8 +84,6 @@ uv run python examples/run_prorl.py \
     policy.train_global_batch_size=1024 \
     policy.train_micro_batch_size=1 \
     policy.logprob_batch_size=1 \
-    policy.dtensor_cfg.activation_checkpointing=true \
-    policy.dtensor_cfg.cpu_offload=true \
     ++policy.generation.prorl_server_num_workers=${PRORL_SERVER_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
     ++policy.generation.max_prompt_length=1024 \
