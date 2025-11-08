@@ -58,6 +58,7 @@ uv run python examples/run_prorl.py \
     policy.megatron_cfg.empty_unused_memory_level=1 \
     policy.megatron_cfg.optimizer.lr=1e-6 \
     policy.megatron_cfg.optimizer.min_lr=1e-6 \
+    policy.megatron_cfg.scheduler.lr_warmup_init=1e-6 \
     ++policy.generation.prorl_server_num_workers=${PRORL_SERVER_NUM_WORKERS} \
     ++policy.generation.is_reasoning_task=true \
     ++policy.generation.max_prompt_length=1024 \
